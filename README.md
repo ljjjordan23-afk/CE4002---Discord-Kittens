@@ -1,6 +1,7 @@
 # CE4002---Discord-Kittens
 
 == If you are using the local file ==
+
 1.) Download the project folder from GitHub or unzip it.
 
 2.) Open terminal inside the project folder.
