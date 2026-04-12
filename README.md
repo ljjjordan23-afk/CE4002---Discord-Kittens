@@ -1,4 +1,4 @@
-# CE4002---Discord-Kittens
+# CE3204---Discord-Kittens
 
 == If you are using the local file ==
 
