@@ -29,7 +29,6 @@ def get_deflection_limit_ratio(design_standard):
 
     return mapping.get(code, 360.0)
 
-print("RUN_ANALYSIS IS EXECUTING")
 def get_deflection_limit_mm(span_m, design_standard):
     ratio = get_deflection_limit_ratio(design_standard)
     return span_m * 1000.0 / ratio
@@ -145,20 +144,6 @@ def run_analysis(building, design_standard, governing_basis="utilization"):
         if beam_deflection > max_deflection_value:
             max_deflection_value = beam_deflection
             max_deflection_storey = storey.level
-        print(
-            "DEBUG COLUMN:",
-            {
-                "storey": storey.level,
-                "section": col_left.section.name,
-                "area": col_left.section.area,
-                "I": col_left.section.I,
-                "P": P,
-                "col_stress": col_stress,
-                "col_axial_util": col_axial_util,
-                "col_buckling_capacity_kN": col_buckling_capacity_kN,
-                "col_buckling_util": col_buckling_util,
-            }
-        )
         results.append({
             "storey": storey.level,
             "height_m": storey.height,
