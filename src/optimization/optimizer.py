@@ -101,6 +101,12 @@ def normalize_groups(groups: Optional[Sequence[Sequence[int]]], n_storeys: int) 
     return normalized
 
 
+
+
+def individual_storey_groups(n_storeys: int) -> List[List[int]]:
+    """Return one group per storey for true individual-storey optimization."""
+    return [[i] for i in range(1, n_storeys + 1)]
+
 def normalize_column_class_rules(
     column_class_rules: Optional[List[Dict]],
     n_storeys: int
@@ -455,9 +461,6 @@ def run_grouped_optimization(
     }
 
 
-# ============================================================
-# Faster fallback: storeywise greedy search including grades
-# ============================================================
 
 def run_storeywise_greedy_optimization(
     base_building,
@@ -475,14 +478,14 @@ def run_storeywise_greedy_optimization(
     column_class_rules=None,
 ):
     """
-    Faster fallback optimizer.
+    Greedy individual-storey optimizer.
 
-    Improvements over old sequential optimizer:
-    - considers section + steel grade, not section only
-    - supports multiple allowed shapes
-    - supports column class rules
+    Key fix:
+    Do NOT require full-building feasibility at every local trial.
+    Instead, at each step, choose the candidate that improves the
+    global worst utilization the most, with cost as a tie-breaker.
 
-    Still greedy, so it is not guaranteed to find the global best design.
+    Final full feasibility is checked only at the end.
     """
     n_storeys = len(base_building.storeys)
     column_class_rules = normalize_column_class_rules(column_class_rules, n_storeys)
@@ -524,35 +527,57 @@ def run_storeywise_greedy_optimization(
 
     candidate = deepcopy(base_building)
 
-    # ---- Optimize beams storey by storey
-    for i, storey in enumerate(candidate.storeys):
-        best_local_design = (storey.beam.section, storey.beam.material)
-        best_local_cost = None
+    def evaluate_building(test_building):
+        """
+        Returns a tuple used for greedy comparison:
+        (
+            worst_overshoot_over_u_max,
+            worst_upper_utilization,
+            lower_bound_penalty,
+            total_cost
+        )
 
-        for beam_section, beam_material in beam_design_candidates:
-            test_building = deepcopy(candidate)
-            test_building.storeys[i].beam.section = beam_section
-            test_building.storeys[i].beam.material = beam_material
+        Smaller is better.
+        """
+        results, summary = run_analysis(test_building, design_standard)
 
-            if not satisfies_column_class_rules(test_building, column_class_rules):
-                continue
+        all_utils = []
+        lower_penalty = 0.0
 
-            results, summary = run_analysis(test_building, design_standard)
+        for r in results:
+            beam_u = r["beam_utilization"]
+            col_u = r["column_utilization"]
+            all_utils.extend([beam_u, col_u])
 
-            if not is_feasible(results, u_min=u_min, u_max=u_max):
-                continue
+            if u_min is not None:
+                if beam_u < u_min:
+                    lower_penalty += (u_min - beam_u)
+                if col_u < u_min:
+                    lower_penalty += (u_min - col_u)
 
-            if best_local_cost is None or summary["total_cost_SGD"] < best_local_cost:
-                best_local_cost = summary["total_cost_SGD"]
-                best_local_design = (beam_section, beam_material)
+        worst_upper_util = max(all_utils) if all_utils else float("inf")
 
-        candidate.storeys[i].beam.section = best_local_design[0]
-        candidate.storeys[i].beam.material = best_local_design[1]
+        if u_max is None:
+            worst_overshoot = 0.0
+        else:
+            worst_overshoot = max(0.0, worst_upper_util - u_max)
 
-    # ---- Optimize columns storey by storey
+        return (
+            worst_overshoot,
+            worst_upper_util,
+            lower_penalty,
+            summary["total_cost_SGD"],
+            results,
+            summary,
+        )
+
+    # Start from current building score
+    current_score = evaluate_building(candidate)
+
+    # Optimize columns first, because your governing failure is usually there
     for i, storey in enumerate(candidate.storeys):
         best_local_design = (storey.column_left.section, storey.column_left.material)
-        best_local_cost = None
+        best_local_score = current_score
 
         for column_section, column_material in column_design_candidates:
             test_building = deepcopy(candidate)
@@ -564,19 +589,41 @@ def run_storeywise_greedy_optimization(
             if not satisfies_column_class_rules(test_building, column_class_rules):
                 continue
 
-            results, summary = run_analysis(test_building, design_standard)
+            score = evaluate_building(test_building)
 
-            if not is_feasible(results, u_min=u_min, u_max=u_max):
-                continue
-
-            if best_local_cost is None or summary["total_cost_SGD"] < best_local_cost:
-                best_local_cost = summary["total_cost_SGD"]
+            # Compare only the ranking part, not results/summary payload
+            if score[:4] < best_local_score[:4]:
+                best_local_score = score
                 best_local_design = (column_section, column_material)
 
         candidate.storeys[i].column_left.section = best_local_design[0]
         candidate.storeys[i].column_right.section = best_local_design[0]
         candidate.storeys[i].column_left.material = best_local_design[1]
         candidate.storeys[i].column_right.material = best_local_design[1]
+        current_score = evaluate_building(candidate)
+
+    # Then optimize beams
+    for i, storey in enumerate(candidate.storeys):
+        best_local_design = (storey.beam.section, storey.beam.material)
+        best_local_score = current_score
+
+        for beam_section, beam_material in beam_design_candidates:
+            test_building = deepcopy(candidate)
+            test_building.storeys[i].beam.section = beam_section
+            test_building.storeys[i].beam.material = beam_material
+
+            if not satisfies_column_class_rules(test_building, column_class_rules):
+                continue
+
+            score = evaluate_building(test_building)
+
+            if score[:4] < best_local_score[:4]:
+                best_local_score = score
+                best_local_design = (beam_section, beam_material)
+
+        candidate.storeys[i].beam.section = best_local_design[0]
+        candidate.storeys[i].beam.material = best_local_design[1]
+        current_score = evaluate_building(candidate)
 
     results, summary = run_analysis(candidate, design_standard)
 
@@ -588,7 +635,7 @@ def run_storeywise_greedy_optimization(
             "best_beam_designs": None,
             "best_column_designs": None,
             "best_beam_sections": None,
-            "best_column_sections": None
+            "best_column_sections": None,
         }
 
     if not is_feasible(results, u_min=u_min, u_max=u_max):
@@ -599,7 +646,7 @@ def run_storeywise_greedy_optimization(
             "best_beam_designs": None,
             "best_column_designs": None,
             "best_beam_sections": None,
-            "best_column_sections": None
+            "best_column_sections": None,
         }
 
     return {
@@ -615,9 +662,8 @@ def run_storeywise_greedy_optimization(
             for s in candidate.storeys
         ],
         "best_beam_sections": [s.beam.section.name for s in candidate.storeys],
-        "best_column_sections": [s.column_left.section.name for s in candidate.storeys]
+        "best_column_sections": [s.column_left.section.name for s in candidate.storeys],
     }
-
 
 # ============================================================
 # Backward-compatible wrapper
