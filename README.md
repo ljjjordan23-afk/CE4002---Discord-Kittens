@@ -11,6 +11,4 @@
 4.) Run the app: streamlit run src/visualization/interactive_frame_viewer.py 
 
 Else: Use the link:   
-Local URL: http://localhost:8501
-Network URL: http://10.0.1.178:8501
-External URL: http://23.97.62.114:8501
+https://interactiveframeviewerpy-alwxyu3rtonc5jjr9kr6kl.streamlit.app/
