@@ -1,6 +1,9 @@
 from pathlib import Path
 import sys
 import pandas as pd
+import os
+from datetime import datetime
+
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 if str(BASE_DIR) not in sys.path:
@@ -250,14 +253,19 @@ def run_analysis(building, design_standard, governing_basis="utilization"):
 
     return results, summary
 
-def export_results_to_excel(results, summary, filename="outputs/module2_results.xlsx"):
+def export_results_to_excel(results, summary, filename=None):
     """
-    Exports analysis/optimization results to Excel
+    Export the current optimized solution to Excel.
+    If filename is not provided, create a timestamped one.
     """
+    os.makedirs("outputs", exist_ok=True)
+
+    if filename is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"outputs/optimized_solution_{timestamp}.xlsx"
 
     df = pd.DataFrame(results)
 
-    # Reorder columns (clean like your UI)
     columns_order = [
         "storey",
         "height_m",
@@ -267,8 +275,10 @@ def export_results_to_excel(results, summary, filename="outputs/module2_results.
 
         "beam_section",
         "beam_grade",
+        "beam_Mmax_kNm",
         "beam_stress_MPa",
         "beam_utilization",
+        "beam_deflection_mm",
         "beam_cost_SGD",
 
         "column_section",
@@ -276,27 +286,23 @@ def export_results_to_excel(results, summary, filename="outputs/module2_results.
         "column_force_kN",
         "column_stress_MPa",
         "column_utilization",
+        "column_axial_utilization",
+        "column_buckling_capacity_kN",
+        "column_buckling_utilization",
+        "column_governing_check",
         "column_left_cost_SGD",
         "column_right_cost_SGD",
 
-        "storey_total_cost_SGD"
+        "storey_total_cost_SGD",
     ]
 
-    # Keep only columns that exist
     columns_order = [col for col in columns_order if col in df.columns]
     df = df[columns_order]
 
-    # Create summary sheet
-    summary_df = pd.DataFrame([{
-        "Total Cost (SGD)": summary["total_cost_SGD"],
-        "Governing Member": summary["governing_member_type"],
-        "Governing Storey": summary["governing_storey"],
-        "Max Utilization": summary["max_utilization"]
-    }])
+    summary_df = pd.DataFrame([summary])
 
-    # Write to Excel
     with pd.ExcelWriter(filename, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="Results", index=False)
+        df.to_excel(writer, sheet_name="Optimized Solution", index=False)
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
 
     return filename
