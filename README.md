@@ -10,4 +10,4 @@
 
 4.) Run the app: streamlit run src/visualization/interactive_frame_viewer.py 
 
-Else: Use the link: https://interactiveframeviewerpy-alwxyu3rtonc5jjr9kr6kl.streamlit.app/ 
+Else: Use the link: https://interactiveframeviewerpy-alwxyu3rtonc5jjr9kr6kl.streamlit.app/ (old one)
