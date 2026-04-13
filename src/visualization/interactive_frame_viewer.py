@@ -535,14 +535,14 @@ def build_constraints_input(num_storeys):
     allowed_beam_shapes = ["I"]
     st.sidebar.multiselect(
         "Allowed beam shapes",
-        ["I"],
+        ["I", "SHS", "CHS"],
         default=["I"],
         disabled=True
     )
 
     allowed_column_shapes = st.sidebar.multiselect(
         "Allowed column shapes",
-        ["SHS", "CHS"],
+        ["I", "SHS", "CHS"],
         default=["SHS", "CHS"]
     )
 
