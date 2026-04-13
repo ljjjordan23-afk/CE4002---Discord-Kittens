@@ -937,7 +937,7 @@ def main():
             st.download_button(
                 label="Download File",
                 data=f,
-                file_name="structure_results.xlsx",
+                file_name="StructureAnalysis_results.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
     
