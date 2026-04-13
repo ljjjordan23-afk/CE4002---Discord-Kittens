@@ -12,17 +12,88 @@ import os
 from src.analysis.analysis_engine import export_results_to_excel
 
 from src.io.input_handler import load_module1_input, build_building_from_module1
-from src.analysis.analysis_engine import run_analysis
 from src.database.db_query import (
     get_all_section_names,
     get_all_material_grades,
     get_all_design_standard_codes,
 )
-from src.optimization.optimizer import (
-    run_grouped_optimization,
-    run_storeywise_greedy_optimization,
-)
+from src.services.analysis_service import run_analysis_service
+from src.services.optimization_service import run_optimization_service
+from src.optimization.optimizer import individual_storey_groups
 
+
+
+
+@st.cache_data
+def get_cached_section_names():
+    return get_all_section_names()
+
+
+@st.cache_data
+def get_cached_material_grades():
+    return get_all_material_grades()
+
+
+@st.cache_data
+def get_cached_design_standard_codes():
+    return get_all_design_standard_codes()
+
+
+def initialize_app_state():
+    defaults = {
+        "computed_payload": None,
+        "last_mode": None,
+        "last_run_signature": None,
+        "last_error": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def clear_computed_payload():
+    st.session_state["computed_payload"] = None
+    st.session_state["last_run_signature"] = None
+    st.session_state["last_error"] = None
+
+
+def build_run_signature(input_data):
+    constraints = input_data["constraints"]
+    storeys_sig = tuple(
+        (
+            row["level"],
+            row["height"],
+            row["dead_load"],
+            row["live_load"],
+            row["beam_section"],
+            row["beam_grade"],
+            row["column_section"],
+            row["column_grade"],
+        )
+        for row in input_data["storeys"]
+    )
+
+    return (
+        input_data["run_mode"],
+        input_data["num_storeys"],
+        input_data["span"],
+        input_data["design_standard"],
+        input_data["governing_basis"],
+        int(input_data["candidate_pool"]),
+        storeys_sig,
+        constraints["u_min"],
+        constraints["u_max"],
+        tuple(tuple(g) for g in constraints["beam_groups"]),
+        tuple(tuple(g) for g in constraints["column_groups"]),
+        constraints["min_grade"],
+        constraints["max_grade"],
+        tuple(constraints["allowed_beam_shapes"]),
+        tuple(constraints["allowed_column_shapes"]),
+        tuple(
+            (tuple(rule["storeys"]), tuple(rule["allowed_classes"]))
+            for rule in constraints["column_class_rules"]
+        ),
+    )
 
 def build_member_options(results):
     options = []
@@ -483,7 +554,7 @@ def parse_class_list(class_text):
     return [int(x.strip()) for x in class_text.split(",") if x.strip()]
 
 
-def build_constraints_input(num_storeys):
+def build_constraints_input(num_storeys, run_mode):
     st.sidebar.markdown("---")
     st.sidebar.header("Optimization Constraints")
 
@@ -503,19 +574,42 @@ def build_constraints_input(num_storeys):
         step=0.05
     )
 
-    default_beam_groups, default_column_groups = get_group_labels(num_storeys)
-    default_beam_group_text = groups_to_text(default_beam_groups)
-    default_column_group_text = groups_to_text(default_column_groups)
+    if run_mode == "Individual-Storey Optimization":
+        default_beam_groups = individual_storey_groups(num_storeys)
+        default_column_groups = individual_storey_groups(num_storeys)
+        default_beam_group_text = groups_to_text(default_beam_groups)
+        default_column_group_text = groups_to_text(default_column_groups)
 
-    beam_group_text = st.sidebar.text_input(
-        "Beam groups",
-        value=default_beam_group_text
-    )
+        st.sidebar.text_input(
+            "Beam groups",
+            value=default_beam_group_text,
+            disabled=True,
+            help="Locked automatically in Individual-Storey Optimization so each storey is optimized independently."
+        )
 
-    column_group_text = st.sidebar.text_input(
-        "Column groups",
-        value=default_column_group_text
-    )
+        st.sidebar.text_input(
+            "Column groups",
+            value=default_column_group_text,
+            disabled=True,
+            help="Locked automatically in Individual-Storey Optimization so each storey is optimized independently."
+        )
+
+        beam_groups = default_beam_groups
+        column_groups = default_column_groups
+    else:
+        default_beam_groups, default_column_groups = get_group_labels(num_storeys)
+        default_beam_group_text = groups_to_text(default_beam_groups)
+        default_column_group_text = groups_to_text(default_column_groups)
+
+        beam_group_text = st.sidebar.text_input(
+            "Beam groups",
+            value=default_beam_group_text
+        )
+
+        column_group_text = st.sidebar.text_input(
+            "Column groups",
+            value=default_column_group_text
+        )
 
     min_grade = st.sidebar.selectbox(
         "Minimum steel grade",
@@ -535,14 +629,14 @@ def build_constraints_input(num_storeys):
     allowed_beam_shapes = ["I"]
     st.sidebar.multiselect(
         "Allowed beam shapes",
-        ["I", "SHS", "CHS"],
+        ["I"],
         default=["I"],
         disabled=True
     )
 
     allowed_column_shapes = st.sidebar.multiselect(
         "Allowed column shapes",
-        ["I", "SHS", "CHS"],
+        ["SHS", "CHS"],
         default=["SHS", "CHS"]
     )
 
@@ -557,8 +651,9 @@ def build_constraints_input(num_storeys):
     )
 
     try:
-        beam_groups = parse_group_string(beam_group_text)
-        column_groups = parse_group_string(column_group_text)
+        if run_mode != "Individual-Storey Optimization":
+            beam_groups = parse_group_string(beam_group_text)
+            column_groups = parse_group_string(column_group_text)
 
         class_rule_storeys = []
         class_rule_parts = [p.strip() for p in class_rule_storey_text.split(",") if p.strip()]
@@ -715,7 +810,11 @@ def build_sidebar_input(default_data, all_sections, all_grades, all_codes):
                 "column_grade": column_grade
             })
 
-    constraints = build_constraints_input(num_storeys)
+    constraints = build_constraints_input(num_storeys, run_mode)
+
+    st.sidebar.markdown("---")
+    run_clicked = st.sidebar.button("Run Current Mode", use_container_width=True)
+    clear_clicked = st.sidebar.button("Clear Saved Results", use_container_width=True)
 
     return {
         "num_storeys": num_storeys,
@@ -725,7 +824,9 @@ def build_sidebar_input(default_data, all_sections, all_grades, all_codes):
         "run_mode": run_mode,
         "governing_basis": governing_basis,
         "candidate_pool": candidate_pool,
-        "constraints": constraints
+        "constraints": constraints,
+        "run_clicked": run_clicked,
+        "clear_clicked": clear_clicked,
     }
 
 
@@ -743,6 +844,12 @@ def show_optimization_settings(input_data):
     st.markdown(f"**Candidate pool size per shape:** {int(input_data['candidate_pool'])}")
     st.markdown(
         f"**Steel grade range:** {input_data['constraints']['min_grade']} to {input_data['constraints']['max_grade']}"
+    )
+    st.markdown(
+        f"**Beam groups applied:** {groups_to_text(input_data['constraints']['beam_groups'])}"
+    )
+    st.markdown(
+        f"**Column groups applied:** {groups_to_text(input_data['constraints']['column_groups'])}"
     )
 
 
@@ -805,13 +912,20 @@ def show_optimization_summary(input_data, optimization_result):
 
 def main():
     st.set_page_config(page_title="CE3204 Interactive Frame Viewer", layout="wide")
+    initialize_app_state()
 
     default_data = load_module1_input("input_module1.json")
-    all_sections = get_all_section_names()
-    all_grades = get_all_material_grades()
-    all_codes = get_all_design_standard_codes()
+    all_sections = get_cached_section_names()
+    all_grades = get_cached_material_grades()
+    all_codes = get_cached_design_standard_codes()
 
     input_data = build_sidebar_input(default_data, all_sections, all_grades, all_codes)
+
+    if input_data["clear_clicked"]:
+        clear_computed_payload()
+
+    if st.session_state["last_mode"] != input_data["run_mode"]:
+        st.session_state["last_mode"] = input_data["run_mode"]
 
     min_grade_val = int(input_data["constraints"]["min_grade"].replace("S", ""))
     max_grade_val = int(input_data["constraints"]["max_grade"].replace("S", ""))
@@ -828,72 +942,53 @@ def main():
         st.error(f"Input/build error: {e}")
         return
 
-    optimization_result = None
+    current_signature = build_run_signature(input_data)
 
-    try:
-        if input_data["run_mode"] == "Analysis":
-            results, summary = run_analysis(
-                building,
-                design,
-                governing_basis=input_data["governing_basis"]
-            )
+    if input_data["run_clicked"]:
+        try:
+            with st.spinner(f"Running {input_data['run_mode'].lower()}..."):
+                if input_data["run_mode"] == "Analysis":
+                    payload = run_analysis_service(
+                        building,
+                        design,
+                        governing_basis=input_data["governing_basis"],
+                    )
+                else:
+                    payload = run_optimization_service(building, design, input_data)
 
-        elif input_data["run_mode"] == "Grouped Optimization":
-            optimization_result = run_grouped_optimization(
-                base_building=building,
-                design_standard=design,
-                beam_groups=input_data["constraints"]["beam_groups"],
-                column_groups=input_data["constraints"]["column_groups"],
-                beam_shapes=input_data["constraints"]["allowed_beam_shapes"],
-                column_shapes=input_data["constraints"]["allowed_column_shapes"],
-                beam_min_grade=min_grade_val,
-                beam_max_grade=max_grade_val,
-                column_min_grade=min_grade_val,
-                column_max_grade=max_grade_val,
-                u_min=input_data["constraints"]["u_min"],
-                u_max=input_data["constraints"]["u_max"],
-                max_beam_candidates_per_shape=int(input_data["candidate_pool"]),
-                max_column_candidates_per_shape=int(input_data["candidate_pool"]),
-                column_class_rules=input_data["constraints"]["column_class_rules"],
-                verbose=True,
-            )
+                if payload.get("summary") is None:
+                    clear_computed_payload()
+                    st.session_state["last_error"] = (
+                        "No feasible grouped optimization design found."
+                        if input_data["run_mode"] == "Grouped Optimization"
+                        else "No feasible individual-storey optimization design found."
+                    )
+                else:
+                    st.session_state["computed_payload"] = payload
+                    st.session_state["last_run_signature"] = current_signature
+                    st.session_state["last_error"] = None
 
-            if optimization_result["summary"] is None:
-                st.error("No feasible grouped optimization design found.")
-                return
+        except Exception as e:
+            clear_computed_payload()
+            st.session_state["last_error"] = f"Analysis/optimization error: {e}"
 
-            building = optimization_result["building"]
-            results = optimization_result["results"]
-            summary = optimization_result["summary"]
+    payload = st.session_state.get("computed_payload")
 
-        else:  # Individual-Storey Optimization
-            optimization_result = run_storeywise_greedy_optimization(
-                base_building=building,
-                design_standard=design,
-                beam_shapes=input_data["constraints"]["allowed_beam_shapes"],
-                column_shapes=input_data["constraints"]["allowed_column_shapes"],
-                beam_min_grade=min_grade_val,
-                beam_max_grade=max_grade_val,
-                column_min_grade=min_grade_val,
-                column_max_grade=max_grade_val,
-                u_min=input_data["constraints"]["u_min"],
-                u_max=input_data["constraints"]["u_max"],
-                max_beam_candidates_per_shape=int(input_data["candidate_pool"]),
-                max_column_candidates_per_shape=int(input_data["candidate_pool"]),
-                column_class_rules=input_data["constraints"]["column_class_rules"],
-            )
+    if st.session_state.get("last_error"):
+        st.error(st.session_state["last_error"])
 
-            if optimization_result["summary"] is None:
-                st.error("No feasible individual-storey optimization design found.")
-                return
-
-            building = optimization_result["building"]
-            results = optimization_result["results"]
-            summary = optimization_result["summary"]
-
-    except Exception as e:
-        st.error(f"Analysis/optimization error: {e}")
+    if payload is None:
+        st.info("Set your inputs, then click 'Run Current Mode'. Saved results stay on screen until you run again or clear them.")
+        show_optimization_settings(input_data)
         return
+
+    if st.session_state.get("last_run_signature") != current_signature:
+        st.warning("Displayed results are from the last run. Click 'Run Current Mode' to refresh them with your latest inputs.")
+
+    building = payload["building"]
+    results = payload["results"]
+    summary = payload["summary"]
+    optimization_result = payload if input_data["run_mode"] != "Analysis" else None
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Cost (SGD)", f"{summary['total_cost_SGD']:.3f}")
@@ -901,6 +996,11 @@ def main():
     c3.metric("Governing Member", f"{summary['governing_member_type']} @ Storey {summary['governing_storey']}")
 
     st.markdown("---")
+
+    if optimization_result is not None:
+        show_optimization_settings(input_data)
+        show_optimization_summary(input_data, optimization_result)
+        st.markdown("---")
 
     member_options = build_member_options(results)
     selected_text = st.selectbox("Select member to inspect", member_options)
@@ -928,7 +1028,7 @@ def main():
         st.markdown(f"**Type:** {summary['governing_member_type']}")
         st.markdown(f"**Storey:** {summary['governing_storey']}")
         st.markdown(f"**Utilization:** {summary['max_utilization']:.3f}")
-            
+
     if st.button("Download Excel Results"):
         os.makedirs("outputs", exist_ok=True)
         file_path = export_results_to_excel(results, summary)
@@ -937,10 +1037,9 @@ def main():
             st.download_button(
                 label="Download File",
                 data=f,
-                file_name="StructureAnalysis_results.xlsx",
+                file_name="structure_results.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-    
 
 
 if __name__ == "__main__":
