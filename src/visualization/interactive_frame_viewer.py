@@ -91,8 +91,14 @@ def build_run_signature(input_data):
         tuple(constraints["allowed_column_shapes"]),
         tuple(
             (tuple(rule["storeys"]), tuple(rule["allowed_classes"]))
+            for rule in constraints["beam_class_rules"]
+        ),
+        tuple(
+            (tuple(rule["storeys"]), tuple(rule["allowed_classes"]))
             for rule in constraints["column_class_rules"]
         ),
+        input_data.get("beam_class_rules_enabled", True),
+        input_data.get("column_class_rules_enabled", True),
     )
 
 def build_member_options(results):
@@ -144,6 +150,9 @@ def get_beam_label(r, governing_basis):
         return f"{r['beam_section']}<br>δ={r.get('beam_deflection_mm', 0.0):.2f} mm"
     else:
         return f"{r['beam_section']}<br>U={r['beam_utilization']:.3f}"
+
+def get_column_label(r):
+    return f"{r['column_section']}<br>U={r['column_utilization']:.3f}"
 
 def create_interactive_frame(building, results, selected_member_type, selected_storey, governing_basis):
     fig = go.Figure()
@@ -235,6 +244,10 @@ def create_interactive_frame(building, results, selected_member_type, selected_s
         if beam_selected:
             beam_label = f"<b>{beam_label}</b>"
 
+        column_label = get_column_label(r)
+        if col_selected:
+            column_label = f"<b>{column_label}</b>"
+
         is_top_storey = (r["storey"] == results[-1]["storey"])
 
         if is_top_storey:
@@ -254,13 +267,34 @@ def create_interactive_frame(building, results, selected_member_type, selected_s
             yanchor=yanchor
         )
 
+        # Add column labels
+        fig.add_annotation(
+            x=-0.8,
+            y=(current_y + next_y) / 2,
+            text=column_label,
+            showarrow=False,
+            font=dict(size=10),
+            align="center",
+            xanchor="center"
+        )
+
+        fig.add_annotation(
+            x=building.span + 0.8,
+            y=(current_y + next_y) / 2,
+            text=column_label,
+            showarrow=False,
+            font=dict(size=10),
+            align="center",
+            xanchor="center"
+        )
+
         current_y = next_y
 
     fig.update_layout(
         title="Interactive Steel Frame Viewer",
         xaxis_title="Span (m)",
         yaxis_title="Height (m)",
-        xaxis=dict(range=[-1.7, building.span + 1.7]),
+        xaxis=dict(range=[-2.0, building.span + 2.0]),
         yaxis=dict(range=[0, current_y + 1.8]),
         template="plotly_dark",
         height=780,
@@ -496,8 +530,8 @@ def get_group_labels(num_storeys):
         beam_groups = [[1], [2]]
         column_groups = [[1], [2]]
     elif num_storeys >= 5:
-        beam_groups = [[1], list(range(2, num_storeys)), [num_storeys]]
-        column_groups = [list(range(1, num_storeys)), [num_storeys]]
+        beam_groups = [[1], [2, 3, 4], list(range(5, num_storeys + 1))]
+        column_groups = [[1, 2, 3, 4], list(range(5, num_storeys + 1))]
     else:
         beam_groups = [[i] for i in range(1, num_storeys + 1)]
         column_groups = [[i] for i in range(1, num_storeys + 1)]
@@ -562,7 +596,7 @@ def build_constraints_input(num_storeys, run_mode):
         "Utilization lower bound",
         min_value=0.0,
         max_value=1.5,
-        value=0.5,
+        value=0.2,
         step=0.05
     )
 
@@ -584,14 +618,16 @@ def build_constraints_input(num_storeys, run_mode):
             "Beam groups",
             value=default_beam_group_text,
             disabled=True,
-            help="Locked automatically in Individual-Storey Optimization so each storey is optimized independently."
+            help="Locked automatically in Individual-Storey Optimization so each storey is optimized independently.",
+            key=f"beam_group_text_{run_mode}_{num_storeys}"
         )
 
         st.sidebar.text_input(
             "Column groups",
             value=default_column_group_text,
             disabled=True,
-            help="Locked automatically in Individual-Storey Optimization so each storey is optimized independently."
+            help="Locked automatically in Individual-Storey Optimization so each storey is optimized independently.",
+            key=f"column_group_text_{run_mode}_{num_storeys}"
         )
 
         beam_groups = default_beam_groups
@@ -603,12 +639,14 @@ def build_constraints_input(num_storeys, run_mode):
 
         beam_group_text = st.sidebar.text_input(
             "Beam groups",
-            value=default_beam_group_text
+            value=default_beam_group_text,
+            key=f"beam_group_text_{run_mode}_{num_storeys}"
         )
 
         column_group_text = st.sidebar.text_input(
             "Column groups",
-            value=default_column_group_text
+            value=default_column_group_text,
+            key=f"column_group_text_{run_mode}_{num_storeys}"
         )
 
     min_grade = st.sidebar.selectbox(
@@ -640,14 +678,44 @@ def build_constraints_input(num_storeys, run_mode):
         default=["SHS", "CHS"]
     )
 
+    # Toggle for class rules
+    st.sidebar.divider()
+    st.sidebar.subheader("Design Class Restrictions (Optional)")
+    
+    beam_class_rules_enabled = st.sidebar.checkbox(
+        "Enable beam class rules",
+        value=True,
+        help="Check to enforce beam section class restrictions by storey"
+    )
+
+    column_class_rules_enabled = st.sidebar.checkbox(
+        "Enable column class rules",
+        value=True,
+        help="Check to enforce column section class restrictions by storey"
+    )
+
+    beam_class_rule_storey_text = st.sidebar.text_input(
+        "Beam class rule storeys",
+        value="1-3",
+        disabled=not beam_class_rules_enabled
+    )
+
+    beam_class_rule_allowed_text = st.sidebar.text_input(
+        "Allowed beam classes for those storeys",
+        value="1,2,3",
+        disabled=not beam_class_rules_enabled
+    )
+
     class_rule_storey_text = st.sidebar.text_input(
         "Column class rule storeys",
-        value="1-3"
+        value="1-3",
+        disabled=not column_class_rules_enabled
     )
 
     class_rule_allowed_text = st.sidebar.text_input(
         "Allowed column classes for those storeys",
-        value="1,2"
+        value="1,2",
+        disabled=not column_class_rules_enabled
     )
 
     try:
@@ -655,24 +723,34 @@ def build_constraints_input(num_storeys, run_mode):
             beam_groups = parse_group_string(beam_group_text)
             column_groups = parse_group_string(column_group_text)
 
-        class_rule_storeys = []
-        class_rule_parts = [p.strip() for p in class_rule_storey_text.split(",") if p.strip()]
-        for part in class_rule_parts:
-            if "-" in part:
-                a, b = part.split("-")
-                a = int(a.strip())
-                b = int(b.strip())
-                if a > b:
-                    raise ValueError(f"Invalid class-rule range '{part}'.")
-                class_rule_storeys.extend(list(range(a, b + 1)))
-            else:
-                class_rule_storeys.append(int(part))
+        def parse_rule_storeys(rule_text):
+            parsed_storeys = []
+            for part in [p.strip() for p in rule_text.split(",") if p.strip()]:
+                if "-" in part:
+                    a, b = part.split("-")
+                    a = int(a.strip())
+                    b = int(b.strip())
+                    if a > b:
+                        raise ValueError(f"Invalid class-rule range '{part}'.")
+                    parsed_storeys.extend(list(range(a, b + 1)))
+                else:
+                    parsed_storeys.append(int(part))
+            return sorted(list(set(parsed_storeys)))
 
-        class_rule_storeys = sorted(list(set(class_rule_storeys)))
+        beam_class_rule_storeys = parse_rule_storeys(beam_class_rule_storey_text)
+        beam_allowed_classes = parse_class_list(beam_class_rule_allowed_text)
+        class_rule_storeys = parse_rule_storeys(class_rule_storey_text)
         allowed_classes = parse_class_list(class_rule_allowed_text)
 
+        beam_class_rules = []
+        if beam_class_rules_enabled and beam_class_rule_storeys and beam_allowed_classes:
+            beam_class_rules.append({
+                "storeys": beam_class_rule_storeys,
+                "allowed_classes": beam_allowed_classes
+            })
+
         column_class_rules = []
-        if class_rule_storeys and allowed_classes:
+        if column_class_rules_enabled and class_rule_storeys and allowed_classes:
             column_class_rules.append({
                 "storeys": class_rule_storeys,
                 "allowed_classes": allowed_classes
@@ -682,6 +760,7 @@ def build_constraints_input(num_storeys, run_mode):
         st.sidebar.error(f"Constraint input error: {e}")
         beam_groups = default_beam_groups
         column_groups = default_column_groups
+        beam_class_rules = []
         column_class_rules = []
 
     constraints = {
@@ -693,10 +772,11 @@ def build_constraints_input(num_storeys, run_mode):
         "max_grade": max_grade,
         "allowed_beam_shapes": allowed_beam_shapes,
         "allowed_column_shapes": allowed_column_shapes,
+        "beam_class_rules": beam_class_rules,
         "column_class_rules": column_class_rules
     }
 
-    return constraints
+    return constraints, beam_class_rules_enabled, column_class_rules_enabled
 
 
 def build_sidebar_input(default_data, all_sections, all_grades, all_codes):
@@ -756,9 +836,9 @@ def build_sidebar_input(default_data, all_sections, all_grades, all_codes):
         else:
             d = {
                 "level": i + 1,
-                "height": 3.0,
-                "dead_load": 5.0,
-                "live_load": 3.0,
+                "height": 1.5,
+                "dead_load": 1.5,
+                "live_load": 1.5,
                 "beam_section": all_sections[0],
                 "beam_grade": all_grades[0],
                 "column_section": all_sections[0],
@@ -810,7 +890,7 @@ def build_sidebar_input(default_data, all_sections, all_grades, all_codes):
                 "column_grade": column_grade
             })
 
-    constraints = build_constraints_input(num_storeys, run_mode)
+    constraints, beam_class_rules_enabled, column_class_rules_enabled = build_constraints_input(num_storeys, run_mode)
 
     st.sidebar.markdown("---")
     run_clicked = st.sidebar.button("Run Current Mode", use_container_width=True)
@@ -825,6 +905,8 @@ def build_sidebar_input(default_data, all_sections, all_grades, all_codes):
         "governing_basis": governing_basis,
         "candidate_pool": candidate_pool,
         "constraints": constraints,
+        "beam_class_rules_enabled": beam_class_rules_enabled,
+        "column_class_rules_enabled": column_class_rules_enabled,
         "run_clicked": run_clicked,
         "clear_clicked": clear_clicked,
     }
@@ -851,6 +933,18 @@ def show_optimization_settings(input_data):
     st.markdown(
         f"**Column groups applied:** {groups_to_text(input_data['constraints']['column_groups'])}"
     )
+    if input_data["constraints"]["beam_class_rules"]:
+        beam_rules_text = "; ".join(
+            f"storeys {groups_to_text([rule['storeys']])}: classes {', '.join(str(c) for c in rule['allowed_classes'])}"
+            for rule in input_data["constraints"]["beam_class_rules"]
+        )
+        st.markdown(f"**Beam class rules:** {beam_rules_text}")
+    if input_data["constraints"]["column_class_rules"]:
+        column_rules_text = "; ".join(
+            f"storeys {groups_to_text([rule['storeys']])}: classes {', '.join(str(c) for c in rule['allowed_classes'])}"
+            for rule in input_data["constraints"]["column_class_rules"]
+        )
+        st.markdown(f"**Column class rules:** {column_rules_text}")
 
 
 def show_optimization_summary(input_data, optimization_result):
@@ -879,7 +973,7 @@ def show_optimization_summary(input_data, optimization_result):
             for i, d in enumerate(optimization_result["best_beam_designs"], start=1):
                 group_text = format_storey_group(beam_groups[i - 1])
                 st.markdown(
-                    f"- **Beam Group {i} ({group_text})**: {d['section']} | {d['grade']}"
+                    f"- **Beam Group {i} ({group_text})**: {d['section']} | {d['grade']} | Util: {d['max_utilization']:.3f}"
                 )
 
         if optimization_result.get("best_column_designs"):
@@ -887,7 +981,7 @@ def show_optimization_summary(input_data, optimization_result):
             for i, d in enumerate(optimization_result["best_column_designs"], start=1):
                 group_text = format_storey_group(column_groups[i - 1])
                 st.markdown(
-                    f"- **Column Group {i} ({group_text})**: {d['section']} | {d['grade']}"
+                    f"- **Column Group {i} ({group_text})**: {d['section']} | {d['grade']} | Util: {d['max_utilization']:.3f}"
                 )
 
         if optimization_result.get("meta"):
@@ -902,12 +996,17 @@ def show_optimization_summary(input_data, optimization_result):
         if optimization_result.get("best_beam_designs"):
             st.markdown("**Optimized Beam Designs by Storey**")
             for i, d in enumerate(optimization_result["best_beam_designs"], start=1):
-                st.markdown(f"- **Storey {i} Beam**: {d['section']} | {d['grade']}")
+                st.markdown(f"- **Storey {i} Beam**: {d['section']} | {d['grade']} | Util: {d['max_utilization']:.3f}")
 
         if optimization_result.get("best_column_designs"):
             st.markdown("**Optimized Column Designs by Storey**")
             for i, d in enumerate(optimization_result["best_column_designs"], start=1):
-                st.markdown(f"- **Storey {i} Column**: {d['section']} | {d['grade']}")
+                st.markdown(f"- **Storey {i} Column**: {d['section']} | {d['grade']} | Util: {d['max_utilization']:.3f}")
+
+    storage = optimization_result.get("storage")
+    if storage:
+        st.markdown(f"**Saved Excel output:** `{storage['excel_path']}`")
+        st.markdown(f"**Saved structured results file:** `{storage['results_path']}` (run ID {storage['run_id']})")
 
 
 def main():
@@ -1029,17 +1128,19 @@ def main():
         st.markdown(f"**Storey:** {summary['governing_storey']}")
         st.markdown(f"**Utilization:** {summary['max_utilization']:.3f}")
 
-    if st.button("Download Excel Results"):
+    if optimization_result is not None and optimization_result.get("storage"):
+        file_path = optimization_result["storage"]["excel_path"]
+    else:
         os.makedirs("outputs", exist_ok=True)
         file_path = export_results_to_excel(results, summary)
 
-        with open(file_path, "rb") as f:
-            st.download_button(
-                label="Download File",
-                data=f,
-                file_name="structure_results.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+    with open(file_path, "rb") as f:
+        st.download_button(
+            label="Download Excel Results",
+            data=f.read(),
+            file_name=Path(file_path).name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 
 if __name__ == "__main__":
