@@ -206,7 +206,7 @@ def run_analysis(building, design_standard, governing_basis="utilization"):
         governing_member_type = max_utilization_member_type
         governing_storey = max_utilization_storey
         governing_value = max_utilization_value
-        governing_label = "Max Utilization"
+        governing_label = f"Max {governing_member_type} Utilization"
         governing_unit = "-"
 
     summary = {
@@ -237,6 +237,7 @@ def run_analysis(building, design_standard, governing_basis="utilization"):
     }
 
     return results, summary
+
 
 def export_results_to_excel(results, summary, filename=None):
     """
