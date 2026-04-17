@@ -1,696 +1,604 @@
-from __future__ import annotations
-
 from copy import deepcopy
-from itertools import product
-from typing import Iterable, List, Dict, Tuple, Optional, Sequence, Set
+from dataclasses import dataclass
+from math import prod
 
+from src.analysis.analysis_engine import get_deflection_limit_mm, run_analysis
 from src.database.db_query import (
-    get_unique_sections_by_shape_sorted,
     get_materials_in_grade_range,
+    get_unique_sections_by_shape_sorted,
 )
-from src.models.section import Section
+from src.io.output_writer import write_optimization_results
+from src.database.optimization_results_db import save_optimization_run
 from src.models.material import Material
-from src.analysis.analysis_engine import run_analysis
+from src.models.section import Section
 
 
-# ============================================================
-# Helpers: validation / normalization
-# ============================================================
-
-VALID_SHAPES = {"I", "SHS", "CHS"}
-
-
-def _as_shape_list(shapes) -> List[str]:
-    """
-    Accepts:
-      - "I"
-      - ["SHS", "CHS"]
-      - ("I", "SHS")
-      - None
-    Returns a validated list of shapes.
-    """
-    if shapes is None:
-        return []
-
-    if isinstance(shapes, str):
-        shapes = [shapes]
-
-    out = []
-    for s in shapes:
-        s = str(s).strip().upper()
-        if s not in VALID_SHAPES:
-            raise ValueError(
-                f"Invalid section shape '{s}'. Allowed shapes are {sorted(VALID_SHAPES)}."
-            )
-        if s not in out:
-            out.append(s)
-    return out
+@dataclass
+class CandidateDesign:
+    member_type: str
+    group_storeys: list
+    section_name: str
+    grade: str
+    total_cost: float
+    min_utilization: float
+    max_utilization: float
+    shape: str
+    section_class: int
+    details: list
 
 
-def _sorted_unique_ints(values: Iterable[int]) -> List[int]:
-    return sorted({int(v) for v in values})
+def individual_storey_groups(num_storeys):
+    return [[storey] for storey in range(1, int(num_storeys) + 1)]
 
 
-def normalize_groups(groups: Optional[Sequence[Sequence[int]]], n_storeys: int) -> List[List[int]]:
-    """
-    Validates user-defined groups.
-    Rules:
-    - every storey from 1..n must appear exactly once
-    - no duplicates
-    - no missing storeys
-    - no out-of-range storeys
-    """
-    if not groups:
-        return [[i] for i in range(1, n_storeys + 1)]
+def _normalize_groups(groups, num_storeys):
+    normalized = []
+    expected = set(range(1, int(num_storeys) + 1))
+    seen = set()
 
-    normalized: List[List[int]] = []
-    seen: List[int] = []
+    for group in groups:
+        cleaned = sorted({int(storey) for storey in group})
+        if not cleaned:
+            raise ValueError("Empty optimization group is not allowed.")
 
-    for g in groups:
-        if not g:
-            raise ValueError("A group cannot be empty.")
+        invalid = [storey for storey in cleaned if storey not in expected]
+        if invalid:
+            raise ValueError(f"Invalid storey numbers in optimization group: {invalid}")
 
-        group = _sorted_unique_ints(g)
+        overlap = seen.intersection(cleaned)
+        if overlap:
+            raise ValueError(f"Overlapping optimization group storeys detected: {sorted(overlap)}")
 
-        for s in group:
-            if s < 1 or s > n_storeys:
-                raise ValueError(
-                    f"Storey {s} is out of range. Valid storeys are 1 to {n_storeys}."
-                )
+        normalized.append(cleaned)
+        seen.update(cleaned)
 
-        normalized.append(group)
-        seen.extend(group)
-
-    seen_sorted = sorted(seen)
-
-    if len(seen_sorted) != len(set(seen_sorted)):
-        duplicates = sorted({x for x in seen_sorted if seen_sorted.count(x) > 1})
-        raise ValueError(f"Duplicate storeys detected in groups: {duplicates}")
-
-    expected = list(range(1, n_storeys + 1))
-    if seen_sorted != expected:
-        missing = sorted(set(expected) - set(seen_sorted))
-        extra = sorted(set(seen_sorted) - set(expected))
-        msg = []
-        if missing:
-            msg.append(f"missing storeys {missing}")
-        if extra:
-            msg.append(f"invalid storeys {extra}")
-        raise ValueError("Groups must cover every storey exactly once: " + ", ".join(msg))
+    if seen != expected:
+        missing = sorted(expected - seen)
+        raise ValueError(f"Optimization groups must cover every storey exactly once. Missing: {missing}")
 
     return normalized
 
 
+def _class_limit_for_storey(storey, class_rules):
+    if not class_rules:
+        return None
+
+    allowed = []
+    for rule in class_rules:
+        rule_storeys = {int(s) for s in rule.get("storeys", [])}
+        if int(storey) in rule_storeys:
+            allowed.extend(int(c) for c in rule.get("allowed_classes", []))
+
+    if not allowed:
+        return None
+
+    return max(allowed)
 
 
-def individual_storey_groups(n_storeys: int) -> List[List[int]]:
-    """Return one group per storey for true individual-storey optimization."""
-    return [[i] for i in range(1, n_storeys + 1)]
-
-def normalize_column_class_rules(
-    column_class_rules: Optional[List[Dict]],
-    n_storeys: int
-) -> List[Dict]:
-    """
-    Expected input format:
-    [
-        {
-            "storeys": [1, 2, 3],
-            "allowed_classes": [1, 2]
-        },
-        ...
-    ]
-    """
-    if not column_class_rules:
-        return []
-
-    out = []
-    for idx, rule in enumerate(column_class_rules, start=1):
-        if "storeys" not in rule or "allowed_classes" not in rule:
-            raise ValueError(
-                f"Column class rule #{idx} must contain 'storeys' and 'allowed_classes'."
-            )
-
-        storeys = _sorted_unique_ints(rule["storeys"])
-        allowed_classes = _sorted_unique_ints(rule["allowed_classes"])
-
-        for s in storeys:
-            if s < 1 or s > n_storeys:
-                raise ValueError(
-                    f"Column class rule #{idx} has out-of-range storey {s}. "
-                    f"Valid storeys are 1 to {n_storeys}."
-                )
-
-        for c in allowed_classes:
-            if c not in {1, 2, 3, 4}:
-                raise ValueError(
-                    f"Column class rule #{idx} has invalid class {c}. Allowed classes are 1, 2, 3, 4."
-                )
-
-        out.append({"storeys": storeys, "allowed_classes": allowed_classes})
-
-    return out
-
-
-# ============================================================
-# Helpers: feasibility / candidate handling
-# ============================================================
-
-def is_feasible(results, u_min=None, u_max=None) -> bool:
-    for r in results:
-        beam_u = r["beam_utilization"]
-        col_u = r["column_utilization"]
-
-        if u_min is not None and (beam_u < u_min or col_u < u_min):
-            return False
-
-        if u_max is not None and (beam_u > u_max or col_u > u_max):
-            return False
-
-    return True
-
-
-def satisfies_column_class_rules(candidate, column_class_rules=None) -> bool:
-    if not column_class_rules:
-        return True
-
-    for rule in column_class_rules:
-        allowed_classes = set(rule["allowed_classes"])
-        storeys = set(rule["storeys"])
-
-        for storey in candidate.storeys:
-            if storey.level in storeys:
-                col_class = storey.column_left.section.section_class
-                if col_class not in allowed_classes:
-                    return False
-
-    return True
-
-
-def row_name_set(rows):
-    return {r[0] for r in rows}
-
-
-def add_base_sections_to_pool(rows, base_section_names, allowed_shapes=None):
-    existing = row_name_set(rows)
-    extra = []
-    allowed_shapes = set(_as_shape_list(allowed_shapes)) if allowed_shapes else None
-
-    for sec in base_section_names:
-        row = (sec.name, sec.shape, sec.area, sec.weight, sec.I, sec.W, sec.section_class)
-        if allowed_shapes is not None and sec.shape not in allowed_shapes:
-            continue
-        if sec.name not in existing:
-            extra.append(row)
-            existing.add(sec.name)
-
-    return rows + extra
-
-
-def add_base_materials_to_pool(rows, base_materials):
-    existing = {r[0] for r in rows}
-    extra = []
-
-    for mat in base_materials:
-        row = (mat.grade, mat.fy, mat.cost)
-        if mat.grade not in existing:
-            extra.append(row)
-            existing.add(mat.grade)
-
-    return rows + extra
-
-
-def build_design_candidates(section_rows, material_rows):
-    sections = [Section(*row) for row in section_rows]
-    materials = [Material(*row) for row in material_rows]
-
-    design_candidates = []
-    for sec in sections:
-        for mat in materials:
-            design_candidates.append((sec, mat))
-
-    return design_candidates
-
-
-def get_section_rows_for_shapes(
-    shapes,
-    sort_by="weight",
-    max_candidates_per_shape=12
-):
-    """
-    Returns a combined candidate pool across one or more allowed shapes.
-    Keeps up to max_candidates_per_shape from each shape to prevent one shape
-    from dominating the pool.
-    """
-    shapes = _as_shape_list(shapes)
-    all_rows = []
+def _get_sections_for_shapes(shapes):
+    sections = []
     seen_names = set()
 
     for shape in shapes:
-        rows = get_unique_sections_by_shape_sorted(shape, sort_by=sort_by)[:max_candidates_per_shape]
+        rows = get_unique_sections_by_shape_sorted(shape, sort_by="weight")
         for row in rows:
-            if row[0] not in seen_names:
-                all_rows.append(row)
-                seen_names.add(row[0])
+            if row[0] in seen_names:
+                continue
+            seen_names.add(row[0])
+            sections.append(Section(*row))
 
-    # Final lightweight sorting by weight if that field exists in row[3]
-    all_rows.sort(key=lambda r: r[3])
-    return all_rows
-
-
-def assign_beam_designs_by_groups(candidate, beam_group_designs, beam_groups):
-    for group_idx, group_storeys in enumerate(beam_groups):
-        section_obj, material_obj = beam_group_designs[group_idx]
-        for storey in candidate.storeys:
-            if storey.level in group_storeys:
-                storey.beam.section = section_obj
-                storey.beam.material = material_obj
-    return candidate
+    sections.sort(key=lambda s: (s.weight, s.area, s.name))
+    return sections
 
 
-def assign_column_designs_by_groups(candidate, column_group_designs, column_groups):
-    for group_idx, group_storeys in enumerate(column_groups):
-        section_obj, material_obj = column_group_designs[group_idx]
-        for storey in candidate.storeys:
-            if storey.level in group_storeys:
-                storey.column_left.section = section_obj
-                storey.column_right.section = section_obj
-                storey.column_left.material = material_obj
-                storey.column_right.material = material_obj
-    return candidate
+def _get_materials(min_grade, max_grade):
+    return [Material(*row) for row in get_materials_in_grade_range(f"S{min_grade}", f"S{max_grade}")]
 
 
-def estimate_grouped_material_cost(candidate) -> float:
-    total = 0.0
-    for storey in candidate.storeys:
-        beam_length = candidate.span
-        col_length = storey.height
+def _prepare_storey_data(building, design_standard):
+    prepared = []
+    accumulated_column_force = 0.0
 
-        total += beam_length * storey.beam.section.weight * storey.beam.material.cost
-        total += col_length * storey.column_left.section.weight * storey.column_left.material.cost
-        total += col_length * storey.column_right.section.weight * storey.column_right.material.cost
+    temp = []
+    for storey in building.storeys:
+        design_load = storey.design_load(design_standard)
+        beam_force_to_columns = design_load * building.span / 2.0
+        temp.append(
+            {
+                "storey": storey.level,
+                "height_m": storey.height,
+                "design_load_kN_per_m": design_load,
+                "beam_force_to_columns": beam_force_to_columns,
+            }
+        )
 
-    return total
+    for item in reversed(temp):
+        accumulated_column_force += item["beam_force_to_columns"]
+        item["column_force_kN"] = accumulated_column_force
+
+    prepared.extend(sorted(temp, key=lambda row: row["storey"]))
+    return prepared
 
 
-# ============================================================
-# Main optimizer: grouped exact search over filtered candidate pool
-# ============================================================
+def _evaluate_beam_group(
+    building,
+    design_standard,
+    group_storeys,
+    sections,
+    materials,
+    u_min,
+    u_max,
+    class_rules,
+):
+    candidates = []
+    span = building.span
+
+    for section in sections:
+        class_ok = True
+        for storey in group_storeys:
+            class_limit = _class_limit_for_storey(storey, class_rules)
+            if class_limit is not None and int(section.section_class) > class_limit:
+                class_ok = False
+                break
+        if not class_ok:
+            continue
+
+        for material in materials:
+            details = []
+            feasible = True
+
+            for storey_idx in group_storeys:
+                storey = building.storeys[storey_idx - 1]
+                beam = deepcopy(storey.beam)
+                beam.section = section
+                beam.material = material
+
+                utilization = beam.utilization(storey.design_load(design_standard), span)
+                deflection_mm = beam.max_deflection(storey.design_load(design_standard), span)
+                deflection_limit_mm = get_deflection_limit_mm(span, design_standard)
+
+                if utilization < u_min or utilization > u_max or deflection_mm > deflection_limit_mm:
+                    feasible = False
+                    break
+
+                details.append(
+                    {
+                        "storey": storey_idx,
+                        "utilization": utilization,
+                        "deflection_mm": deflection_mm,
+                        "cost_SGD": beam.cost(),
+                    }
+                )
+
+            if not feasible:
+                continue
+
+            candidates.append(
+                CandidateDesign(
+                    member_type="Beam",
+                    group_storeys=group_storeys,
+                    section_name=section.name,
+                    grade=material.grade,
+                    total_cost=sum(item["cost_SGD"] for item in details),
+                    min_utilization=min(item["utilization"] for item in details),
+                    max_utilization=max(item["utilization"] for item in details),
+                    shape=section.shape,
+                    section_class=int(section.section_class),
+                    details=details,
+                )
+            )
+    print(f"DEBUG: Beam group {group_storeys} - evaluated {len(sections)} sections, {len(materials)} materials, generated {len(candidates)} candidates")
+    if candidates:
+        print(f"DEBUG: Cheapest beam candidate: {candidates[0].section_name} {candidates[0].grade} cost={candidates[0].total_cost}")
+
+    candidates.sort(
+        key=lambda c: (
+            c.total_cost,
+            abs(((u_min + u_max) / 2.0) - c.max_utilization),
+            c.section_name,
+            c.grade,
+        )
+    )
+    return candidates
+
+
+def _evaluate_column_group(
+    building,
+    design_standard,
+    group_storeys,
+    sections,
+    materials,
+    u_min,
+    u_max,
+    class_rules,
+    column_k=1.0,
+):
+    candidates = []
+    storey_lookup = {item["storey"]: item for item in _prepare_storey_data(building, design_standard)}
+    
+    class_rejected = 0
+    util_rejected = 0
+    sample_utils = []
+    min_util_achieved = float('inf')
+    best_section_for_min_util = None
+    
+    # Governing storey: the one with HIGHEST load (lowest storey number = highest cumulative force)
+    governing_storey_idx = min(group_storeys)  # Storey 1 carries more than storey 2, etc.
+    governing_force_kN = storey_lookup[governing_storey_idx]["column_force_kN"]
+    governing_storey_height = building.storeys[governing_storey_idx - 1].height
+    
+    # Sort sections by area ascending (smallest first for economy)
+    sorted_sections = sorted(sections, key=lambda s: (s.area, s.weight))
+    # Sort materials by strength ascending (lowest grade first for cost, highest grade last for performance)
+    sorted_materials = sorted(materials, key=lambda m: m.fy)
+
+    for section in sorted_sections:
+        class_ok = True
+        for storey in group_storeys:
+            class_limit = _class_limit_for_storey(storey, class_rules)
+            if class_limit is not None and int(section.section_class) > class_limit:
+                class_ok = False
+                break
+        if not class_ok:
+            class_rejected += 1
+            continue
+
+        # For each section, try materials from lowest to highest strength
+        for material in sorted_materials:
+            # Check all storeys in the group for utilization bounds
+            details = []
+            max_util = 0.0
+            min_util = float('inf')
+            for storey_idx in group_storeys:
+                storey = building.storeys[storey_idx - 1]
+                col = deepcopy(storey.column_left)
+                col.section = section
+                col.material = material
+
+                force_kN = storey_lookup[storey_idx]["column_force_kN"]
+                util = col.governing_utilization(force_kN, storey.height, K=column_k)
+                max_util = max(max_util, util)
+                min_util = min(min_util, util)
+
+                details.append(
+                    {
+                        "storey": storey_idx,
+                        "utilization": util,
+                        "cost_SGD": col.cost() * 2.0,
+                    }
+                )
+
+            # Track minimum utilization found across all attempts
+            if min_util < min_util_achieved:
+                min_util_achieved = min_util
+                best_section_for_min_util = (section.name, material.grade, min_util)
+            
+            if len(sample_utils) < 3:
+                sample_utils.append((section.name, material.grade, governing_storey_idx, f"util={max_util:.2f}"))
+
+            # Reject if any storey exceeds upper bound or any below lower bound
+            if max_util > u_max or min_util < u_min:
+                util_rejected += 1
+                continue
+
+            candidates.append(
+                CandidateDesign(
+                    member_type="Column",
+                    group_storeys=group_storeys,
+                    section_name=section.name,
+                    grade=material.grade,
+                    total_cost=sum(item["cost_SGD"] for item in details),
+                    min_utilization=min(item["utilization"] for item in details),
+                    max_utilization=max(item["utilization"] for item in details),
+                    shape=section.shape,
+                    section_class=int(section.section_class),
+                    details=details,
+                )
+            )
+
+    candidates.sort(
+        key=lambda c: (
+            c.total_cost,
+            abs(((u_min + u_max) / 2.0) - c.max_utilization),
+            c.section_name,
+            c.grade,
+        )
+    )
+    
+    # Debug: show what was evaluated
+    min_section_tried = sorted_sections[0].name if sorted_sections else "N/A"
+    max_section_tried = sorted_sections[-1].name if sorted_sections else "N/A"
+    min_util_str = f"{min_util_achieved:.2f}" if min_util_achieved != float('inf') else "N/A"
+    best_section_str = f"{best_section_for_min_util[0]} {best_section_for_min_util[1]} (util={best_section_for_min_util[2]:.2f})" if best_section_for_min_util else "N/A"
+    
+    print(f"DEBUG: Column group {group_storeys}: governing_storey={governing_storey_idx}, class_rejected={class_rejected}, util_rejected={util_rejected}, feasible={len(candidates)}")
+    print(f"DEBUG: Sections evaluated: {min_section_tried} to {max_section_tried} ({len(sorted_sections)} total)")
+    print(f"DEBUG: Min util achieved: {min_util_str} with {best_section_str} (target: {u_min}-{u_max})")
+    if sample_utils:
+        print(f"DEBUG: Sample utils: {sample_utils}")
+    return candidates
+
+
+def _apply_designs_to_building(base_building, beam_designs, beam_groups, column_designs, column_groups):
+    building = deepcopy(base_building)
+
+    for group, design in zip(beam_groups, beam_designs):
+        for storey_idx in group:
+            storey = building.storeys[storey_idx - 1]
+            storey.beam.section = design["section"]
+            storey.beam.material = design["material"]
+
+    for group, design in zip(column_groups, column_designs):
+        for storey_idx in group:
+            storey = building.storeys[storey_idx - 1]
+            storey.column_left.section = design["section"]
+            storey.column_left.material = design["material"]
+            storey.column_right.section = design["section"]
+            storey.column_right.material = design["material"]
+
+    return building
+
+
+def _candidate_to_design(candidate, sections_by_name, materials_by_grade):
+    return {
+        "section": sections_by_name[candidate.section_name],
+        "material": materials_by_grade[candidate.grade],
+    }
+
+
+def _serialize_group_designs(candidates):
+    serialized = []
+    for candidate in candidates:
+        serialized.append(
+            {
+                "storeys": candidate.group_storeys,
+                "section": candidate.section_name,
+                "grade": candidate.grade,
+                "shape": candidate.shape,
+                "section_class": candidate.section_class,
+                "total_cost_SGD": round(candidate.total_cost, 3),
+                "min_utilization": round(candidate.min_utilization, 3),
+                "max_utilization": round(candidate.max_utilization, 3),
+            }
+        )
+    return serialized
+
+
+def _finalize_optimization_payload(
+    building,
+    design_standard,
+    mode,
+    best_beam_candidates,
+    best_column_candidates,
+    meta,
+    input_snapshot,
+):
+    print(f"DEBUG: _finalize_optimization_payload - calling run_analysis with building num_storeys={building.num_storeys}")
+    results, summary = run_analysis(building, design_standard, governing_basis="utilization")
+    print(f"DEBUG: run_analysis returned: results type={type(results)}, summary type={type(summary)}, summary={summary}")
+
+    if summary is None:
+        return {
+            "building": building,
+            "results": [],
+            "summary": None,
+            "mode": mode,
+            "best_beam_designs": [],
+            "best_column_designs": [],
+            "meta": meta,
+            "storage": None,
+        }
+
+    excel_path = write_optimization_results(
+        results=results,
+        summary=summary,
+        filename=None,
+        settings=input_snapshot,
+        mode=mode,
+    )
+
+    run_id, storage_path = save_optimization_run(
+        results=results,
+        summary=summary,
+        input_snapshot=input_snapshot,
+        mode=mode,
+        excel_path=str(excel_path),
+    )
+
+    return {
+        "building": building,
+        "results": results,
+        "summary": summary,
+        "mode": mode,
+        "best_beam_designs": _serialize_group_designs(best_beam_candidates),
+        "best_column_designs": _serialize_group_designs(best_column_candidates),
+        "meta": meta,
+        "storage": {
+            "results_path": str(storage_path),
+            "excel_path": str(excel_path),
+            "run_id": run_id,
+        },
+    }
+
 
 def run_grouped_optimization(
     base_building,
     design_standard,
-    beam_groups=None,
-    column_groups=None,
-    beam_shapes=("I",),
-    column_shapes=("SHS",),
-    beam_min_grade=235,
-    beam_max_grade=355,
-    column_min_grade=235,
-    column_max_grade=355,
-    u_min=None,
-    u_max=1.0,
-    max_beam_candidates_per_shape=12,
-    max_column_candidates_per_shape=12,
+    beam_groups,
+    column_groups,
+    beam_shapes,
+    column_shapes,
+    beam_min_grade,
+    beam_max_grade,
+    column_min_grade,
+    column_max_grade,
+    u_min,
+    u_max,
+    max_beam_candidates_per_shape=8,
+    max_column_candidates_per_shape=8,
+    beam_class_rules=None,
     column_class_rules=None,
     verbose=False,
 ):
-    """
-    Strongest Module 2 optimizer in this file.
+    del max_beam_candidates_per_shape, max_column_candidates_per_shape, verbose
 
-    It searches all combinations across:
-    - grouped beam section+grade choices
-    - grouped column section+grade choices
-    subject to:
-    - utilization range
-    - beam and column allowed shapes
-    - beam and column grade ranges
-    - grouped storey assignments
-    - column section class rules
+    beam_groups = _normalize_groups(beam_groups, base_building.num_storeys)
+    column_groups = _normalize_groups(column_groups, base_building.num_storeys)
 
-    Note:
-    This finds the best feasible design within the filtered candidate pools,
-    not necessarily across the entire full database if candidate caps are used.
-    """
-    n_storeys = len(base_building.storeys)
+    beam_sections = _get_sections_for_shapes(beam_shapes)
+    column_sections = _get_sections_for_shapes(column_shapes)
+    beam_materials = _get_materials(beam_min_grade, beam_max_grade)
+    column_materials = _get_materials(column_min_grade, column_max_grade)
 
-    beam_groups = normalize_groups(beam_groups, n_storeys)
-    column_groups = normalize_groups(column_groups, n_storeys)
-    beam_shapes = _as_shape_list(beam_shapes)
-    column_shapes = _as_shape_list(column_shapes)
-    column_class_rules = normalize_column_class_rules(column_class_rules, n_storeys)
+    print("DEBUG: beam Loaded materials:", [(m.grade, m.fy) for m in beam_materials])
+    print("DEBUG: column Loaded materials:", [(m.grade, m.fy) for m in column_materials])
+    print("DEBUG: beam_shapes =", beam_shapes, "beam_sections =", len(beam_sections))
+    print("DEBUG: column_shapes =", column_shapes, "column_sections =", len(column_sections))
 
-    beam_rows = get_section_rows_for_shapes(
-        beam_shapes,
-        sort_by="weight",
-        max_candidates_per_shape=max_beam_candidates_per_shape
-    )
-    column_rows = get_section_rows_for_shapes(
-        column_shapes,
-        sort_by="weight",
-        max_candidates_per_shape=max_column_candidates_per_shape
-    )
+    sections_by_name = {section.name: section for section in beam_sections + column_sections}
+    materials_by_grade = {material.grade: material for material in beam_materials + column_materials}
 
-    beam_material_rows = get_materials_in_grade_range(beam_min_grade, beam_max_grade)
-    column_material_rows = get_materials_in_grade_range(column_min_grade, column_max_grade)
+    beam_candidates = []
+    column_candidates = []
 
-    base_beam_sections = [storey.beam.section for storey in base_building.storeys]
-    base_column_sections = [storey.column_left.section for storey in base_building.storeys]
-    base_beam_materials = [storey.beam.material for storey in base_building.storeys]
-    base_column_materials = [storey.column_left.material for storey in base_building.storeys]
-
-    beam_rows = add_base_sections_to_pool(beam_rows, base_beam_sections, allowed_shapes=beam_shapes)
-    column_rows = add_base_sections_to_pool(column_rows, base_column_sections, allowed_shapes=column_shapes)
-    beam_material_rows = add_base_materials_to_pool(beam_material_rows, base_beam_materials)
-    column_material_rows = add_base_materials_to_pool(column_material_rows, base_column_materials)
-
-    beam_design_candidates = build_design_candidates(beam_rows, beam_material_rows)
-    column_design_candidates = build_design_candidates(column_rows, column_material_rows)
-
-    if not beam_design_candidates:
-        raise ValueError("No beam design candidates found after applying shape and grade filters.")
-    if not column_design_candidates:
-        raise ValueError("No column design candidates found after applying shape and grade filters.")
-
-    best_results = None
-    best_summary = None
-    best_building = None
-    best_beam_designs = None
-    best_column_designs = None
-
-    combo_count = 0
-    feasible_count = 0
-
-    beam_group_combos = product(beam_design_candidates, repeat=len(beam_groups))
-
-    for beam_combo in beam_group_combos:
-        beam_base_candidate = deepcopy(base_building)
-        beam_base_candidate = assign_beam_designs_by_groups(
-            beam_base_candidate,
-            beam_group_designs=beam_combo,
-            beam_groups=beam_groups
+    for group in beam_groups:
+        candidates = _evaluate_beam_group(
+            building=base_building,
+            design_standard=design_standard,
+            group_storeys=group,
+            sections=beam_sections,
+            materials=beam_materials,
+            u_min=u_min,
+            u_max=u_max,
+            class_rules=beam_class_rules or [],
         )
-
-        column_group_combos = product(column_design_candidates, repeat=len(column_groups))
-
-        for column_combo in column_group_combos:
-            combo_count += 1
-
-            candidate = deepcopy(beam_base_candidate)
-            candidate = assign_column_designs_by_groups(
-                candidate,
-                column_group_designs=column_combo,
-                column_groups=column_groups
-            )
-
-            if not satisfies_column_class_rules(candidate, column_class_rules):
-                continue
-
-            estimated_cost = estimate_grouped_material_cost(candidate)
-            if best_summary is not None and estimated_cost >= best_summary["total_cost_SGD"]:
-                continue
-
-            results, summary = run_analysis(candidate, design_standard)
-
-            if not is_feasible(results, u_min=u_min, u_max=u_max):
-                continue
-
-            feasible_count += 1
-
-            if best_summary is None or summary["total_cost_SGD"] < best_summary["total_cost_SGD"]:
-                best_results = results
-                best_summary = summary
-                best_building = candidate
-                best_beam_designs = [{"section": sec.name, "grade": mat.grade} for sec, mat in beam_combo]
-                best_column_designs = [{"section": sec.name, "grade": mat.grade} for sec, mat in column_combo]
-
-            if verbose and combo_count % 500 == 0:
-                print(
-                    f"[Grouped Opt] Checked {combo_count} combinations | "
-                    f"Feasible {feasible_count} | "
-                    f"Best cost: {best_summary['total_cost_SGD'] if best_summary else 'N/A'}"
-                )
-
-    if best_building is None:
-        return {
-            "building": None,
-            "results": None,
-            "summary": None,
-            "best_beam_designs": None,
-            "best_column_designs": None,
-            "best_beam_sections": None,
-            "best_column_sections": None,
-            "meta": {
-                "checked_combinations": combo_count,
-                "feasible_combinations": feasible_count,
+        if not candidates:
+            return {
+                "building": base_building,
+                "results": [],
+                "summary": None,
+                "mode": "Grouped Optimization",
+                "best_beam_designs": [],
+                "best_column_designs": [],
+                "meta": {
+                    "checked_combinations": 0,
+                    "feasible_combinations": 0,
+                    "failure_reason": f"No feasible beam design for group {group}.",
+                },
+                "storage": None,
             }
-        }
+        beam_candidates.append(candidates)
 
-    return {
-        "building": best_building,
-        "results": best_results,
-        "summary": best_summary,
-        "best_beam_designs": best_beam_designs,
-        "best_column_designs": best_column_designs,
-        "best_beam_sections": [d["section"] for d in best_beam_designs],
-        "best_column_sections": [d["section"] for d in best_column_designs],
-        "meta": {
-            "checked_combinations": combo_count,
-            "feasible_combinations": feasible_count,
-        }
+    for group in column_groups:
+        candidates = _evaluate_column_group(
+            building=base_building,
+            design_standard=design_standard,
+            group_storeys=group,
+            sections=column_sections,
+            materials=column_materials,
+            u_min=u_min,
+            u_max=u_max,
+            class_rules=column_class_rules or [],
+        )
+        print(f"DEBUG: Column group {group} - evaluated {len(column_sections)} sections, {len(column_materials)} materials, generated {len(candidates)} candidates")
+        if candidates:
+            print(f"DEBUG: Cheapest column candidate: {candidates[0].section_name} {candidates[0].grade} cost={candidates[0].total_cost}")
+        if not candidates:
+            return {
+                "building": base_building,
+                "results": [],
+                "summary": None,
+                "mode": "Grouped Optimization",
+                "best_beam_designs": [],
+                "best_column_designs": [],
+                "meta": {
+                    "checked_combinations": 0,
+                    "feasible_combinations": 0,
+                    "failure_reason": f"No feasible column design for group {group}.",
+                },
+                "storage": None,
+            }
+        column_candidates.append(candidates)
+
+    best_beam_candidates = [candidates[0] for candidates in beam_candidates]
+    best_column_candidates = [candidates[0] for candidates in column_candidates]
+
+    building = _apply_designs_to_building(
+        base_building=base_building,
+        beam_designs=[_candidate_to_design(candidate, sections_by_name, materials_by_grade) for candidate in best_beam_candidates],
+        beam_groups=beam_groups,
+        column_designs=[_candidate_to_design(candidate, sections_by_name, materials_by_grade) for candidate in best_column_candidates],
+        column_groups=column_groups,
+    )
+
+    checked_combinations = prod(len(candidates) for candidates in beam_candidates + column_candidates)
+    feasible_combinations = 1 if checked_combinations > 0 else 0
+
+    input_snapshot = {
+        "num_storeys": base_building.num_storeys,
+        "span": base_building.span,
+        "design_standard": design_standard.code,
+        "constraints": {
+            "u_min": u_min,
+            "u_max": u_max,
+            "beam_groups": beam_groups,
+            "column_groups": column_groups,
+            "beam_shapes": beam_shapes,
+            "column_shapes": column_shapes,
+            "beam_grade_range": [f"S{beam_min_grade}", f"S{beam_max_grade}"],
+            "column_grade_range": [f"S{column_min_grade}", f"S{column_max_grade}"],
+            "beam_class_rules": beam_class_rules or [],
+            "column_class_rules": column_class_rules or [],
+        },
     }
+
+    return _finalize_optimization_payload(
+        building=building,
+        design_standard=design_standard,
+        mode="Grouped Optimization",
+        best_beam_candidates=best_beam_candidates,
+        best_column_candidates=best_column_candidates,
+        meta={
+            "checked_combinations": int(checked_combinations),
+            "feasible_combinations": int(feasible_combinations),
+        },
+        input_snapshot=input_snapshot,
+    )
 
 
 
 def run_storeywise_greedy_optimization(
     base_building,
     design_standard,
-    beam_shapes=("I",),
-    column_shapes=("SHS",),
-    beam_min_grade=235,
-    beam_max_grade=355,
-    column_min_grade=235,
-    column_max_grade=355,
-    u_min=None,
-    u_max=1.0,
-    max_beam_candidates_per_shape=12,
-    max_column_candidates_per_shape=12,
+    beam_shapes,
+    column_shapes,
+    beam_min_grade,
+    beam_max_grade,
+    column_min_grade,
+    column_max_grade,
+    u_min,
+    u_max,
+    max_beam_candidates_per_shape=8,
+    max_column_candidates_per_shape=8,
+    beam_class_rules=None,
     column_class_rules=None,
 ):
-    """
-    Greedy individual-storey optimizer.
-
-    Key fix:
-    Do NOT require full-building feasibility at every local trial.
-    Instead, at each step, choose the candidate that improves the
-    global worst utilization the most, with cost as a tie-breaker.
-
-    Final full feasibility is checked only at the end.
-    """
-    n_storeys = len(base_building.storeys)
-    column_class_rules = normalize_column_class_rules(column_class_rules, n_storeys)
-
-    beam_shapes = _as_shape_list(beam_shapes)
-    column_shapes = _as_shape_list(column_shapes)
-
-    beam_rows = get_section_rows_for_shapes(
-        beam_shapes,
-        sort_by="weight",
-        max_candidates_per_shape=max_beam_candidates_per_shape
-    )
-    column_rows = get_section_rows_for_shapes(
-        column_shapes,
-        sort_by="weight",
-        max_candidates_per_shape=max_column_candidates_per_shape
-    )
-
-    beam_material_rows = get_materials_in_grade_range(beam_min_grade, beam_max_grade)
-    column_material_rows = get_materials_in_grade_range(column_min_grade, column_max_grade)
-
-    base_beam_sections = [storey.beam.section for storey in base_building.storeys]
-    base_column_sections = [storey.column_left.section for storey in base_building.storeys]
-    base_beam_materials = [storey.beam.material for storey in base_building.storeys]
-    base_column_materials = [storey.column_left.material for storey in base_building.storeys]
-
-    beam_rows = add_base_sections_to_pool(beam_rows, base_beam_sections, allowed_shapes=beam_shapes)
-    column_rows = add_base_sections_to_pool(column_rows, base_column_sections, allowed_shapes=column_shapes)
-    beam_material_rows = add_base_materials_to_pool(beam_material_rows, base_beam_materials)
-    column_material_rows = add_base_materials_to_pool(column_material_rows, base_column_materials)
-
-    beam_design_candidates = build_design_candidates(beam_rows, beam_material_rows)
-    column_design_candidates = build_design_candidates(column_rows, column_material_rows)
-
-    if not beam_design_candidates:
-        raise ValueError("No beam design candidates found after applying filters.")
-    if not column_design_candidates:
-        raise ValueError("No column design candidates found after applying filters.")
-
-    candidate = deepcopy(base_building)
-
-    def evaluate_building(test_building):
-        """
-        Returns a tuple used for greedy comparison:
-        (
-            worst_overshoot_over_u_max,
-            worst_upper_utilization,
-            lower_bound_penalty,
-            total_cost
-        )
-
-        Smaller is better.
-        """
-        results, summary = run_analysis(test_building, design_standard)
-
-        all_utils = []
-        lower_penalty = 0.0
-
-        for r in results:
-            beam_u = r["beam_utilization"]
-            col_u = r["column_utilization"]
-            all_utils.extend([beam_u, col_u])
-
-            if u_min is not None:
-                if beam_u < u_min:
-                    lower_penalty += (u_min - beam_u)
-                if col_u < u_min:
-                    lower_penalty += (u_min - col_u)
-
-        worst_upper_util = max(all_utils) if all_utils else float("inf")
-
-        if u_max is None:
-            worst_overshoot = 0.0
-        else:
-            worst_overshoot = max(0.0, worst_upper_util - u_max)
-
-        return (
-            worst_overshoot,
-            worst_upper_util,
-            lower_penalty,
-            summary["total_cost_SGD"],
-            results,
-            summary,
-        )
-
-    # Start from current building score
-    current_score = evaluate_building(candidate)
-
-    # Optimize columns first, because your governing failure is usually there
-    for i, storey in enumerate(candidate.storeys):
-        best_local_design = (storey.column_left.section, storey.column_left.material)
-        best_local_score = current_score
-
-        for column_section, column_material in column_design_candidates:
-            test_building = deepcopy(candidate)
-            test_building.storeys[i].column_left.section = column_section
-            test_building.storeys[i].column_right.section = column_section
-            test_building.storeys[i].column_left.material = column_material
-            test_building.storeys[i].column_right.material = column_material
-
-            if not satisfies_column_class_rules(test_building, column_class_rules):
-                continue
-
-            score = evaluate_building(test_building)
-
-            # Compare only the ranking part, not results/summary payload
-            if score[:4] < best_local_score[:4]:
-                best_local_score = score
-                best_local_design = (column_section, column_material)
-
-        candidate.storeys[i].column_left.section = best_local_design[0]
-        candidate.storeys[i].column_right.section = best_local_design[0]
-        candidate.storeys[i].column_left.material = best_local_design[1]
-        candidate.storeys[i].column_right.material = best_local_design[1]
-        current_score = evaluate_building(candidate)
-
-    # Then optimize beams
-    for i, storey in enumerate(candidate.storeys):
-        best_local_design = (storey.beam.section, storey.beam.material)
-        best_local_score = current_score
-
-        for beam_section, beam_material in beam_design_candidates:
-            test_building = deepcopy(candidate)
-            test_building.storeys[i].beam.section = beam_section
-            test_building.storeys[i].beam.material = beam_material
-
-            if not satisfies_column_class_rules(test_building, column_class_rules):
-                continue
-
-            score = evaluate_building(test_building)
-
-            if score[:4] < best_local_score[:4]:
-                best_local_score = score
-                best_local_design = (beam_section, beam_material)
-
-        candidate.storeys[i].beam.section = best_local_design[0]
-        candidate.storeys[i].beam.material = best_local_design[1]
-        current_score = evaluate_building(candidate)
-
-    results, summary = run_analysis(candidate, design_standard)
-
-    if not satisfies_column_class_rules(candidate, column_class_rules):
-        return {
-            "building": None,
-            "results": None,
-            "summary": None,
-            "best_beam_designs": None,
-            "best_column_designs": None,
-            "best_beam_sections": None,
-            "best_column_sections": None,
-        }
-
-    if not is_feasible(results, u_min=u_min, u_max=u_max):
-        return {
-            "building": None,
-            "results": None,
-            "summary": None,
-            "best_beam_designs": None,
-            "best_column_designs": None,
-            "best_beam_sections": None,
-            "best_column_sections": None,
-        }
-
-    return {
-        "building": candidate,
-        "results": results,
-        "summary": summary,
-        "best_beam_designs": [
-            {"section": s.beam.section.name, "grade": s.beam.material.grade}
-            for s in candidate.storeys
-        ],
-        "best_column_designs": [
-            {"section": s.column_left.section.name, "grade": s.column_left.material.grade}
-            for s in candidate.storeys
-        ],
-        "best_beam_sections": [s.beam.section.name for s in candidate.storeys],
-        "best_column_sections": [s.column_left.section.name for s in candidate.storeys],
-    }
-
-# ============================================================
-# Backward-compatible wrapper
-# ============================================================
-
-def run_individual_storey_sequential_optimization(
-    base_building,
-    design_standard,
-    beam_shape="I",
-    column_shape="SHS",
-    u_min=None,
-    u_max=1.0,
-    max_beam_candidates=12,
-    max_column_candidates=12
-):
-    """
-    Kept for backward compatibility with older UI code.
-
-    Internally redirects to the upgraded greedy optimizer.
-    """
-    return run_storeywise_greedy_optimization(
+    return run_grouped_optimization(
         base_building=base_building,
         design_standard=design_standard,
-        beam_shapes=[beam_shape],
-        column_shapes=[column_shape],
+        beam_groups=individual_storey_groups(base_building.num_storeys),
+        column_groups=individual_storey_groups(base_building.num_storeys),
+        beam_shapes=beam_shapes,
+        column_shapes=column_shapes,
+        beam_min_grade=beam_min_grade,
+        beam_max_grade=beam_max_grade,
+        column_min_grade=column_min_grade,
+        column_max_grade=column_max_grade,
         u_min=u_min,
         u_max=u_max,
-        max_beam_candidates_per_shape=max_beam_candidates,
-        max_column_candidates_per_shape=max_column_candidates,
+        max_beam_candidates_per_shape=max_beam_candidates_per_shape,
+        max_column_candidates_per_shape=max_column_candidates_per_shape,
+        beam_class_rules=beam_class_rules,
+        column_class_rules=column_class_rules,
     )
+ 
