@@ -209,10 +209,6 @@ def create_interactive_frame(building, results, selected_member_type, selected_s
                 f"Grade: {r['column_grade']}<br>"
                 f"Axial load: {r['column_force_kN']:.3f} kN<br>"
                 f"Stress: {r['column_stress_MPa']:.3f} MPa<br>"
-                f"Axial utilization: {r.get('column_axial_utilization', 0.0):.3f}<br>"
-                f"Buckling capacity: {r.get('column_buckling_capacity_kN', 0.0):.3f} kN<br>"
-                f"Buckling utilization: {r.get('column_buckling_utilization', 0.0):.3f}<br>"
-                f"Governing check: {r.get('column_governing_check', 'Axial stress')}<br>"
                 f"Utilization: {r['column_utilization']:.3f}"
                 ),
             showlegend=False
