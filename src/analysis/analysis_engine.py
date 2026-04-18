@@ -33,7 +33,13 @@ def get_deflection_limit_mm(span_m, design_standard):
     ratio = get_deflection_limit_ratio(design_standard)
     return span_m * 1000.0 / ratio
 
-def run_analysis(building, design_standard, governing_basis="utilization"):
+def run_analysis(
+    building,
+    design_standard,
+    governing_basis="utilization",
+    include_column_buckling=False,
+    column_buckling_K=1.0,
+):
     results = []
     total_cost = 0.0
 
@@ -100,13 +106,24 @@ def run_analysis(building, design_standard, governing_basis="utilization"):
         col_stress = col_left.max_stress(P)
         col_axial_util = col_left.axial_utilization(P)
 
-        # simple default effective length factor
-        column_K = 1.0
-        #col_buckling_capacity_kN = col_left.buckling_capacity(storey.height, K=column_K)
-        #col_buckling_util = col_left.buckling_utilization(P, storey.height, K=column_K)
+        col_buckling_capacity_kN = None
+        col_buckling_util = None
+        col_governing_check = "Axial stress"
 
-        col_util = col_axial_util
-        #col_governing_check = "Buckling" if col_buckling_util >= col_axial_util else "Axial stress"
+        if include_column_buckling:
+            col_buckling_capacity_kN = col_left.buckling_capacity(storey.height, K=column_buckling_K)
+            col_buckling_util = col_left.buckling_utilization(P, storey.height, K=column_buckling_K)
+
+            if col_buckling_util >= col_axial_util:
+                col_util = col_buckling_util
+                col_governing_check = "Buckling"
+            else:
+                col_util = col_axial_util
+                col_governing_check = "Axial stress"
+        else:
+            col_util = col_axial_util
+            col_governing_check = "Axial stress"
+
         col_left_cost = col_left.cost()
         col_right_cost = col_right.cost()
 
@@ -167,10 +184,14 @@ def run_analysis(building, design_standard, governing_basis="utilization"):
             "column_grade": col_left.material.grade,
             "column_force_kN": P,
             "column_stress_MPa": col_stress,
+            "column_axial_utilization": col_axial_util,
+            "column_buckling_capacity_kN": col_buckling_capacity_kN,
+            "column_buckling_utilization": col_buckling_util,
+            "column_buckling_K": column_buckling_K if include_column_buckling else None,
+            "column_governing_check": col_governing_check,
             "column_utilization": col_util,
             "column_left_cost_SGD": col_left_cost,
             "column_right_cost_SGD": col_right_cost,
-
             "storey_total_cost_SGD": storey_total_cost
         })
 
@@ -267,6 +288,11 @@ def export_results_to_excel(results, summary, filename=None):
         "column_grade",
         "column_force_kN",
         "column_stress_MPa",
+        "column_axial_utilization",
+        "column_buckling_capacity_kN",
+        "column_buckling_utilization",
+        "column_buckling_K",
+        "column_governing_check",
         "column_utilization",
         "column_left_cost_SGD",
         "column_right_cost_SGD",
