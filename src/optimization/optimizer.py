@@ -2,6 +2,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from math import prod
 
+from pyparsing import col
+
 from src.analysis.analysis_engine import get_deflection_limit_mm, run_analysis
 from src.database.db_query import (
     get_materials_in_grade_range,
@@ -75,12 +77,15 @@ def _class_limit_for_storey(storey, class_rules):
     return max(allowed)
 
 
-def _get_sections_for_shapes(shapes):
+def _get_sections_for_shapes(shapes, max_per_shape=None):
     sections = []
     seen_names = set()
 
     for shape in shapes:
         rows = get_unique_sections_by_shape_sorted(shape, sort_by="weight")
+
+        if max_per_shape is not None and max_per_shape > 0:
+            rows = rows[:max_per_shape]
         for row in rows:
             if row[0] in seen_names:
                 continue
@@ -211,6 +216,7 @@ def _evaluate_column_group(
     u_min,
     u_max,
     class_rules,
+    include_column_buckling=False,
     column_k=1.0,
 ):
     candidates = []
@@ -256,7 +262,10 @@ def _evaluate_column_group(
                 col.material = material
 
                 force_kN = storey_lookup[storey_idx]["column_force_kN"]
-                util = col.governing_utilization(force_kN, storey.height, K=column_k)
+                if include_column_buckling:
+                    util = col.governing_utilization(force_kN, storey.height, K=column_k)
+                else:
+                    util = col.axial_utilization(force_kN)
                 max_util = max(max_util, util)
                 min_util = min(min_util, util)
 
@@ -372,9 +381,17 @@ def _finalize_optimization_payload(
     best_column_candidates,
     meta,
     input_snapshot,
+    include_column_buckling=False,
+    column_buckling_K=1.0,
 ):
     print(f"DEBUG: _finalize_optimization_payload - calling run_analysis with building num_storeys={building.num_storeys}")
-    results, summary = run_analysis(building, design_standard, governing_basis="utilization")
+    results, summary = run_analysis(
+    building,
+    design_standard,
+    governing_basis="utilization",
+    include_column_buckling=include_column_buckling,
+    column_buckling_K=column_buckling_K,
+)
     print(f"DEBUG: run_analysis returned: results type={type(results)}, summary type={type(summary)}, summary={summary}")
 
     if summary is None:
@@ -438,15 +455,23 @@ def run_grouped_optimization(
     max_column_candidates_per_shape=8,
     beam_class_rules=None,
     column_class_rules=None,
+    include_column_buckling=False,
+    column_buckling_K=1.0,
     verbose=False,
 ):
-    del max_beam_candidates_per_shape, max_column_candidates_per_shape, verbose
+    del verbose
 
     beam_groups = _normalize_groups(beam_groups, base_building.num_storeys)
     column_groups = _normalize_groups(column_groups, base_building.num_storeys)
 
-    beam_sections = _get_sections_for_shapes(beam_shapes)
-    column_sections = _get_sections_for_shapes(column_shapes)
+    beam_sections = _get_sections_for_shapes(
+        beam_shapes,
+        max_per_shape=max_beam_candidates_per_shape,
+    )
+    column_sections = _get_sections_for_shapes(
+        column_shapes,
+        max_per_shape=max_column_candidates_per_shape,
+    )
     beam_materials = _get_materials(beam_min_grade, beam_max_grade)
     column_materials = _get_materials(column_min_grade, column_max_grade)
 
@@ -499,6 +524,8 @@ def run_grouped_optimization(
             u_min=u_min,
             u_max=u_max,
             class_rules=column_class_rules or [],
+            include_column_buckling=include_column_buckling,
+            column_k=column_buckling_K,
         )
         print(f"DEBUG: Column group {group} - evaluated {len(column_sections)} sections, {len(column_materials)} materials, generated {len(candidates)} candidates")
         if candidates:
@@ -549,6 +576,8 @@ def run_grouped_optimization(
             "column_grade_range": [f"S{column_min_grade}", f"S{column_max_grade}"],
             "beam_class_rules": beam_class_rules or [],
             "column_class_rules": column_class_rules or [],
+            "include_column_buckling": include_column_buckling,
+            "column_buckling_K": column_buckling_K,
         },
     }
 
@@ -563,6 +592,8 @@ def run_grouped_optimization(
             "feasible_combinations": int(feasible_combinations),
         },
         input_snapshot=input_snapshot,
+        include_column_buckling=include_column_buckling,
+        column_buckling_K=column_buckling_K,
     )
 
 
@@ -582,6 +613,8 @@ def run_storeywise_greedy_optimization(
     max_column_candidates_per_shape=8,
     beam_class_rules=None,
     column_class_rules=None,
+    include_column_buckling=False,
+    column_buckling_K=1.0,
 ):
     return run_grouped_optimization(
         base_building=base_building,
@@ -600,5 +633,7 @@ def run_storeywise_greedy_optimization(
         max_column_candidates_per_shape=max_column_candidates_per_shape,
         beam_class_rules=beam_class_rules,
         column_class_rules=column_class_rules,
+        include_column_buckling=include_column_buckling,
+        column_buckling_K=column_buckling_K,
     )
  
