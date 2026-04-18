@@ -48,6 +48,8 @@ def run_optimization_service(building, design_standard, input_data):
             max_column_candidates_per_shape=int(input_data["candidate_pool"]),
             beam_class_rules=beam_class_rules,
             column_class_rules=column_class_rules,
+            include_column_buckling=constraints.get("include_column_buckling", False),
+            column_buckling_K=float(constraints.get("column_buckling_K", 1.0)),
             verbose=False,
         )
         print("DEBUG: grouped result summary =", result.get("summary"))
@@ -69,6 +71,8 @@ def run_optimization_service(building, design_standard, input_data):
             max_column_candidates_per_shape=int(input_data["candidate_pool"]),
             beam_class_rules=beam_class_rules,
             column_class_rules=column_class_rules,
+            include_column_buckling=constraints.get("include_column_buckling", False),
+            column_buckling_K=float(constraints.get("column_buckling_K", 1.0)),
         )
         print("DEBUG: individual result summary =", result.get("summary"))
         return result
