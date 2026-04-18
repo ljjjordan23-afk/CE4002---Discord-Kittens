@@ -99,6 +99,9 @@ def build_run_signature(input_data):
         ),
         input_data.get("beam_class_rules_enabled", True),
         input_data.get("column_class_rules_enabled", True),
+
+        constraints.get("include_column_buckling", False),
+        float(constraints.get("column_buckling_K", 1.0)),
     )
 
 def build_member_options(results):
@@ -154,7 +157,15 @@ def get_beam_label(r, governing_basis):
 def get_column_label(r):
     return f"{r['column_section']}<br>U={r['column_utilization']:.3f}"
 
-def create_interactive_frame(building, results, selected_member_type, selected_storey, governing_basis):
+def create_interactive_frame(
+    building,
+    results,
+    selected_member_type,
+    selected_storey,
+    governing_basis,
+    show_deformed=False,
+    deformation_scale=50.0,
+):
     fig = go.Figure()
     results = sorted(results, key=lambda x: x["storey"])
 
@@ -210,7 +221,7 @@ def create_interactive_frame(building, results, selected_member_type, selected_s
                 f"Axial load: {r['column_force_kN']:.3f} kN<br>"
                 f"Stress: {r['column_stress_MPa']:.3f} MPa<br>"
                 f"Utilization: {r['column_utilization']:.3f}"
-                ),
+            ),
             showlegend=False
         ))
 
@@ -235,7 +246,6 @@ def create_interactive_frame(building, results, selected_member_type, selected_s
             showlegend=False
         ))
 
-        
         beam_label = get_beam_label(r, governing_basis)
         if beam_selected:
             beam_label = f"<b>{beam_label}</b>"
@@ -263,7 +273,6 @@ def create_interactive_frame(building, results, selected_member_type, selected_s
             yanchor=yanchor
         )
 
-        # Add column labels
         fig.add_annotation(
             x=-0.8,
             y=(current_y + next_y) / 2,
@@ -286,8 +295,77 @@ def create_interactive_frame(building, results, selected_member_type, selected_s
 
         current_y = next_y
 
+    # -------------------------------------------------
+    # Optional illustrative deformed shape overlay
+    # -------------------------------------------------
+    if show_deformed:
+        import numpy as np
+
+        x_curve = np.linspace(x_left, x_right, 60)
+
+        current_y = 0.0
+        deformed_left_nodes = [0.0]
+        deformed_right_nodes = [0.0]
+
+        for i, r in enumerate(results):
+            storey_height = float(r["height_m"])
+            next_y = current_y + storey_height
+
+            beam_defl_mm = float(r.get("beam_deflection_mm", 0.0))
+            beam_defl_m = beam_defl_mm / 1000.0
+
+            sag_shape = 4.0 * (x_curve - x_left) * (x_right - x_curve) / ((x_right - x_left) ** 2)
+            y_def = next_y - deformation_scale * beam_defl_m * sag_shape
+
+            beam_selected = (selected_member_type == "Beam" and selected_storey == r["storey"])
+            beam_line_width = 4 if beam_selected else 2
+
+            fig.add_trace(go.Scatter(
+                x=x_curve,
+                y=y_def,
+                mode="lines",
+                line=dict(color="rgba(180,180,180,0.5)", width=beam_line_width, dash="dot"),
+                hoverinfo="text",
+                text=(
+                    f"<b>Illustrative deformed beam - Storey {r['storey']}</b><br>"
+                    f"Actual beam deflection: {beam_defl_mm:.3f} mm<br>"
+                    f"Visual scale factor: ×{deformation_scale:.0f}"
+                ),
+                name="Deformed shape",
+                showlegend=(i == 0),
+                opacity=0.95,
+            ))
+
+            deformed_left_nodes.append(next_y)
+            deformed_right_nodes.append(next_y)
+            current_y = next_y
+
+        for i, r in enumerate(results):
+            col_selected = (selected_member_type == "Column" and selected_storey == r["storey"])
+            col_line_width = 6 if col_selected else 4
+
+            fig.add_trace(go.Scatter(
+                x=[x_left, x_left],
+                y=[deformed_left_nodes[i], deformed_left_nodes[i + 1]],
+                mode="lines",
+                line=dict(color="rgba(180,180,180,0.5)", width=col_line_width, dash="dot"),
+                hoverinfo="skip",
+                showlegend=False,
+                opacity=0.95,
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=[x_right, x_right],
+                y=[deformed_right_nodes[i], deformed_right_nodes[i + 1]],
+                mode="lines",
+                line=dict(color="rgba(180,180,180,0.5)", width=col_line_width, dash="dot"),
+                hoverinfo="skip",
+                showlegend=False,
+                opacity=0.95,
+            ))
+
     fig.update_layout(
-        title="Interactive Steel Frame Viewer",
+        title="Interactive Steel Frame Viewer" + (" with Deformed Shape Overlay" if show_deformed else ""),
         xaxis_title="Span (m)",
         yaxis_title="Height (m)",
         xaxis=dict(range=[-2.0, building.span + 2.0]),
@@ -384,6 +462,154 @@ def draw_column_schematic(result):
     fig.update_xaxes(visible=False, range=[0, 1])
     fig.update_yaxes(visible=False, range=[0, 1.08], scaleanchor="x", scaleratio=1)
     fig.update_layout(template="plotly_dark", height=240, margin=dict(l=10, r=10, t=20, b=20))
+    return fig
+
+def draw_deformed_frame_plot(results, building, scale_factor=50.0):
+    """
+    Illustrative deformed frame plot based on beam deflection results.
+
+    Notes:
+    - This is a visual deformation view, not a full global FEM displacement solution.
+    - Beam sag is exaggerated by scale_factor for clarity.
+    - Columns are drawn between adjacent storey beam levels.
+    """
+    import numpy as np
+
+    span = float(building.span)
+    n_storeys = len(results)
+
+    # Sort results by storey number
+    sorted_results = sorted(results, key=lambda r: r["storey"])
+
+    # Build storey elevation map
+    elevations = [0.0]
+    for r in sorted_results:
+        elevations.append(elevations[-1] + float(r["height_m"]))
+
+    fig = go.Figure()
+
+    # -----------------------------
+    # 1) Undeformed frame
+    # -----------------------------
+    for i in range(n_storeys):
+        y = elevations[i + 1]
+
+        # beam
+        fig.add_trace(go.Scatter(
+            x=[0.0, span],
+            y=[y, y],
+            mode="lines",
+            name="Undeformed frame" if i == 0 else None,
+            line=dict(color="lightgray", width=3),
+            hoverinfo="skip",
+            showlegend=(i == 0),
+        ))
+
+    # columns undeformed
+    for i in range(n_storeys):
+        y0 = elevations[i]
+        y1 = elevations[i + 1]
+
+        fig.add_trace(go.Scatter(
+            x=[0.0, 0.0],
+            y=[y0, y1],
+            mode="lines",
+            name=None,
+            line=dict(color="lightgray", width=3),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=[span, span],
+            y=[y0, y1],
+            mode="lines",
+            name=None,
+            line=dict(color="lightgray", width=3),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+    # -----------------------------
+    # 2) Deformed beams
+    # -----------------------------
+    x_curve = np.linspace(0.0, span, 60)
+
+    deformed_left_nodes = [0.0]
+    deformed_right_nodes = [0.0]
+
+    for i, r in enumerate(sorted_results):
+        y_top = elevations[i + 1]
+        beam_defl_mm = float(r.get("beam_deflection_mm", 0.0))
+        beam_defl_m = beam_defl_mm / 1000.0
+
+        # exaggerated downward sag shape:
+        # 4x(L-x)/L^2 gives a parabola = 1 at midspan, 0 at supports
+        sag_shape = 4.0 * x_curve * (span - x_curve) / (span ** 2)
+        y_def = y_top - scale_factor * beam_defl_m * sag_shape
+
+        # beam ends stay at the storey elevation in this simple visual
+        deformed_left_nodes.append(y_top)
+        deformed_right_nodes.append(y_top)
+
+        fig.add_trace(go.Scatter(
+            x=x_curve,
+            y=y_def,
+            mode="lines",
+            name="Deformed frame" if i == 0 else None,
+            line=dict(color="deepskyblue", width=4),
+            hovertemplate=(
+                f"Storey {r['storey']} beam<br>"
+                "x = %{x:.2f} m<br>"
+                "deformed y = %{y:.3f} m"
+                "<extra></extra>"
+            ),
+            showlegend=(i == 0),
+        ))
+
+    # -----------------------------
+    # 3) Deformed columns
+    # -----------------------------
+    # Since this is illustrative, keep columns straight between beam levels.
+    # This gives a neat wireframe look without pretending to solve frame sway.
+    for i in range(n_storeys):
+        y0 = deformed_left_nodes[i]
+        y1 = deformed_left_nodes[i + 1]
+
+        fig.add_trace(go.Scatter(
+            x=[0.0, 0.0],
+            y=[y0, y1],
+            mode="lines",
+            line=dict(color="deepskyblue", width=4),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+        y0r = deformed_right_nodes[i]
+        y1r = deformed_right_nodes[i + 1]
+
+        fig.add_trace(go.Scatter(
+            x=[span, span],
+            y=[y0r, y1r],
+            mode="lines",
+            line=dict(color="deepskyblue", width=4),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+    fig.update_layout(
+        title=f"Illustrative Deformed Frame View (Scale ×{scale_factor:.0f})",
+        xaxis_title="Frame width / span (m)",
+        yaxis_title="Elevation (m)",
+        template="plotly_dark",
+        height=650,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
+        margin=dict(l=40, r=20, t=60, b=40),
+    )
+
+    fig.update_xaxes(range=[-0.1 * span, 1.1 * span], zeroline=False)
+    fig.update_yaxes(zeroline=False, scaleanchor=None)
+
     return fig
 
 def draw_beam_sfd_plot(result, building):
@@ -501,10 +727,17 @@ def show_member_details(result, selected_member_type, building):
         st.markdown(f"**Grade:** {result['column_grade']}")
         st.markdown(f"**Axial force:** {result['column_force_kN']:.3f} kN")
         st.markdown(f"**Stress:** {result['column_stress_MPa']:.3f} MPa")
-        st.markdown(f"**Governing column check:** {result.get('column_governing_check', 'Axial stress')}")
-        st.markdown(f"**Utilization:** {result['column_utilization']:.3f} ({band})")
-        st.plotly_chart(draw_column_schematic(result), use_container_width=True)
 
+        st.markdown(f"**Axial utilization:** {result.get('column_axial_utilization', result['column_utilization']):.3f}")
+
+        if "column_buckling_utilization" in result and result["column_buckling_utilization"] is not None:
+            st.markdown(f"**Buckling utilization:** {result['column_buckling_utilization']:.3f}")
+            st.markdown(f"**Buckling capacity:** {result.get('column_buckling_capacity_kN', 0.0):.3f} kN")
+            st.markdown(f"**Buckling K-factor used:** {result.get('column_buckling_K', 1.0):.2f}")
+
+        st.markdown(f"**Governing column check:** {result.get('column_governing_check', 'Axial stress')}")
+        st.markdown(f"**Utilization used:** {result['column_utilization']:.3f} ({band})")
+        st.plotly_chart(draw_column_schematic(result), use_container_width=True)
 
 def format_storey_group(group):
     if len(group) == 1:
@@ -657,18 +890,43 @@ def build_constraints_input(num_storeys, run_mode):
     if int(min_grade.replace("S", "")) > int(max_grade.replace("S", "")):
         st.sidebar.error("Minimum steel grade cannot be higher than maximum steel grade.")
 
-    allowed_beam_shapes = ["I"]
-    st.sidebar.multiselect(
+    allowed_beam_shapes = st.sidebar.multiselect(
         "Allowed beam shapes",
-        ["I"],
+        ["I", "SHS", "CHS"],
         default=["I"],
-        disabled=True
+        help="Choose which section families the optimizer may search for beams."
     )
 
     allowed_column_shapes = st.sidebar.multiselect(
         "Allowed column shapes",
-        ["SHS", "CHS"],
-        default=["SHS", "CHS"]
+        ["I", "SHS", "CHS"],
+        default=["SHS", "CHS"],
+        help="Choose which section families the optimizer may search for columns."
+    )
+
+    if not allowed_beam_shapes:
+        st.sidebar.error("Select at least one beam shape.")
+    if not allowed_column_shapes:
+        st.sidebar.error("Select at least one column shape.")
+
+    st.sidebar.divider()
+    st.sidebar.subheader("Column Check Options")
+
+    include_column_buckling = st.sidebar.checkbox(
+        "Enable column buckling check",
+        value=False,
+        help="When enabled, column utilization is taken as max(axial utilization, buckling utilization). "
+             "When disabled, analysis uses axial utilization only."
+    )
+
+    column_buckling_K = st.sidebar.number_input(
+        "Column effective length factor K",
+        min_value=0.1,
+        max_value=5.0,
+        value=1.0,
+        step=0.1,
+        disabled=not include_column_buckling,
+        help="Used only when column buckling check is enabled."
     )
 
     # Toggle for class rules
@@ -766,7 +1024,9 @@ def build_constraints_input(num_storeys, run_mode):
         "allowed_beam_shapes": allowed_beam_shapes,
         "allowed_column_shapes": allowed_column_shapes,
         "beam_class_rules": beam_class_rules,
-        "column_class_rules": column_class_rules
+        "column_class_rules": column_class_rules,
+        "include_column_buckling": include_column_buckling,
+        "column_buckling_K": column_buckling_K
     }
 
     return constraints, beam_class_rules_enabled, column_class_rules_enabled
@@ -938,6 +1198,14 @@ def show_optimization_settings(input_data):
             for rule in input_data["constraints"]["column_class_rules"]
         )
         st.markdown(f"**Column class rules:** {column_rules_text}")
+    
+    st.markdown(
+        f"**Column buckling check enabled:** {'Yes' if input_data['constraints'].get('include_column_buckling', False) else 'No'}"
+    )
+    if input_data["constraints"].get("include_column_buckling", False):
+        st.markdown(
+            f"**Column K-factor:** {float(input_data['constraints'].get('column_buckling_K', 1.0)):.2f}"
+        )
 
 
 def show_optimization_summary(input_data, optimization_result):
@@ -1044,6 +1312,8 @@ def main():
                         building,
                         design,
                         governing_basis=input_data["governing_basis"],
+                        include_column_buckling=input_data["constraints"].get("include_column_buckling", False),
+                        column_buckling_K=input_data["constraints"].get("column_buckling_K", 1.0),
                     )
                 else:
                     payload = run_optimization_service(building, design, input_data)
@@ -1100,6 +1370,23 @@ def main():
     selected_member_type, selected_storey = parse_selected_member(selected_text)
     selected_result = get_selected_result(results, selected_member_type, selected_storey)
 
+    show_deformed_overlay = st.checkbox(
+        "Show illustrative deformed shape overlay",
+        value=True,
+        help="Adds an exaggerated deformation overlay based on beam deflection results."
+    )
+
+    deformation_scale = 80
+    if show_deformed_overlay:
+        deformation_scale = st.slider(
+            "Deformation scale factor",
+            min_value=1,
+            max_value=200,
+            value=80,
+            step=1,
+            help="Visual exaggeration only."
+        )
+
     left, right = st.columns([2.3, 1])
 
     with left:
@@ -1108,8 +1395,17 @@ def main():
             results,
             selected_member_type,
             selected_storey,
-            input_data["governing_basis"])
+            input_data["governing_basis"],
+            show_deformed=show_deformed_overlay,
+            deformation_scale=float(deformation_scale),
+        )
         st.plotly_chart(fig, use_container_width=True)
+
+        if show_deformed_overlay:
+            st.caption(
+                "The grey dashed overlay is an illustrative deformed shape based on beam deflection results. "
+                "It is not a full global FEM frame displacement solution."
+            )
 
     with right:
         show_utilization_legend()
