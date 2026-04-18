@@ -102,11 +102,11 @@ def run_analysis(building, design_standard, governing_basis="utilization"):
 
         # simple default effective length factor
         column_K = 1.0
-        col_buckling_capacity_kN = col_left.buckling_capacity(storey.height, K=column_K)
-        col_buckling_util = col_left.buckling_utilization(P, storey.height, K=column_K)
+        #col_buckling_capacity_kN = col_left.buckling_capacity(storey.height, K=column_K)
+        #col_buckling_util = col_left.buckling_utilization(P, storey.height, K=column_K)
 
-        col_util = max(col_axial_util, col_buckling_util)
-        col_governing_check = "Buckling" if col_buckling_util >= col_axial_util else "Axial stress"
+        col_util = col_axial_util
+        #col_governing_check = "Buckling" if col_buckling_util >= col_axial_util else "Axial stress"
         col_left_cost = col_left.cost()
         col_right_cost = col_right.cost()
 
@@ -168,10 +168,6 @@ def run_analysis(building, design_standard, governing_basis="utilization"):
             "column_force_kN": P,
             "column_stress_MPa": col_stress,
             "column_utilization": col_util,
-            "column_axial_utilization": col_axial_util,
-            "column_buckling_capacity_kN": col_buckling_capacity_kN,
-            "column_buckling_utilization": col_buckling_util,
-            "column_governing_check": col_governing_check,
             "column_left_cost_SGD": col_left_cost,
             "column_right_cost_SGD": col_right_cost,
 
@@ -272,10 +268,6 @@ def export_results_to_excel(results, summary, filename=None):
         "column_force_kN",
         "column_stress_MPa",
         "column_utilization",
-        "column_axial_utilization",
-        "column_buckling_capacity_kN",
-        "column_buckling_utilization",
-        "column_governing_check",
         "column_left_cost_SGD",
         "column_right_cost_SGD",
 
