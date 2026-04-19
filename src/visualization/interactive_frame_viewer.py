@@ -1166,7 +1166,7 @@ def build_sidebar_input(default_data, all_sections, all_grades, all_codes):
 
 
 def show_optimization_settings(input_data):
-    st.subheader("Optimization Settings")
+    st.subheader("Optimisation Settings")
     st.markdown(f"**Mode:** {input_data['run_mode']}")
     st.markdown(
         f"**Beam shapes searched:** {', '.join(input_data['constraints']['allowed_beam_shapes'])}"
