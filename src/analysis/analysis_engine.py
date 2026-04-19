@@ -279,6 +279,7 @@ def export_results_to_excel(results, summary, filename=None):
         "design_load_kN_per_m",
 
         "beam_section",
+        "beam_section_class",
         "beam_grade",
         "beam_Mmax_kNm",
         "beam_stress_MPa",
@@ -287,6 +288,7 @@ def export_results_to_excel(results, summary, filename=None):
         "beam_cost_SGD",
 
         "column_section",
+        "column_section_class",
         "column_grade",
         "column_force_kN",
         "column_stress_MPa",
