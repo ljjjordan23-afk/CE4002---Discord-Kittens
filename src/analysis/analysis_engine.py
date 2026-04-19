@@ -169,6 +169,7 @@ def run_analysis(
             "design_load_kN_per_m": w,
 
             "beam_section": beam.section.name,
+            "beam_section_class": int(beam.section.section_class) if beam.section.section_class is not None else None,
             "beam_grade": beam.material.grade,
             "beam_Mmax_kNm": beam_moment,
             "beam_stress_MPa": beam_stress,
@@ -181,6 +182,7 @@ def run_analysis(
             "beam_cost_SGD": beam_cost,
 
             "column_section": col_left.section.name,
+            "column_section_class": int(col_left.section.section_class) if col_left.section.section_class is not None else None,
             "column_grade": col_left.material.grade,
             "column_force_kN": P,
             "column_stress_MPa": col_stress,

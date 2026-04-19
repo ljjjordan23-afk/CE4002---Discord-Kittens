@@ -45,6 +45,7 @@ def initialize_app_state():
         "last_mode": None,
         "last_run_signature": None,
         "last_error": None,
+        "beam_rule_count": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -141,21 +142,36 @@ def utilization_band_text(utilization):
         return "Moderate"
     else:
         return "High"
-    
+
+
+def format_section_class_text(section_class):
+    if section_class is None:
+        return ""
+    return f"Class {int(section_class)}"
+
+
 def get_beam_label(r, governing_basis):
     governing_basis = str(governing_basis).strip().lower()
+    section_class_text = format_section_class_text(r.get('beam_section_class'))
+    section_info = f"{r['beam_section']}"
+    if section_class_text:
+        section_info += f" ({section_class_text})"
 
     if governing_basis == "moment":
-        return f"{r['beam_section']}<br>M={r['beam_Mmax_kNm']:.2f} kN·m"
+        return f"{section_info}<br>M={r['beam_Mmax_kNm']:.2f} kN·m"
     elif governing_basis == "stress":
-        return f"{r['beam_section']}<br>σ={r['beam_stress_MPa']:.2f} MPa"
+        return f"{section_info}<br>σ={r['beam_stress_MPa']:.2f} MPa"
     elif governing_basis == "deflection":
-        return f"{r['beam_section']}<br>δ={r.get('beam_deflection_mm', 0.0):.2f} mm"
+        return f"{section_info}<br>δ={r.get('beam_deflection_mm', 0.0):.2f} mm"
     else:
-        return f"{r['beam_section']}<br>U={r['beam_utilization']:.3f}"
+        return f"{section_info}<br>U={r['beam_utilization']:.3f}"
 
 def get_column_label(r):
-    return f"{r['column_section']}<br>U={r['column_utilization']:.3f}"
+    section_class_text = format_section_class_text(r.get('column_section_class'))
+    section_info = f"{r['column_section']}"
+    if section_class_text:
+        section_info += f" ({section_class_text})"
+    return f"{section_info}<br>U={r['column_utilization']:.3f}"
 
 def create_interactive_frame(
     building,
@@ -199,6 +215,7 @@ def create_interactive_frame(
             text=(
                 f"<b>Column - Storey {r['storey']}</b><br>"
                 f"Section: {r['column_section']}<br>"
+                f"Section class: {format_section_class_text(r.get('column_section_class'))}<br>"
                 f"Grade: {r['column_grade']}<br>"
                 f"Force: {r['column_force_kN']:.3f} kN<br>"
                 f"Stress: {r['column_stress_MPa']:.3f} MPa<br>"
@@ -217,6 +234,7 @@ def create_interactive_frame(
             text=(
                 f"<b>Column - Storey {r['storey']}</b><br>"
                 f"Section: {r['column_section']}<br>"
+                f"Section class: {format_section_class_text(r.get('column_section_class'))}<br>"
                 f"Grade: {r['column_grade']}<br>"
                 f"Axial load: {r['column_force_kN']:.3f} kN<br>"
                 f"Stress: {r['column_stress_MPa']:.3f} MPa<br>"
@@ -235,6 +253,7 @@ def create_interactive_frame(
             text=(
                 f"<b>Beam - Storey {r['storey']}</b><br>"
                 f"Section: {r['beam_section']}<br>"
+                f"Section class: {format_section_class_text(r.get('beam_section_class'))}<br>"
                 f"Grade: {r['beam_grade']}<br>"
                 f"Stress: {r['beam_stress_MPa']:.3f} MPa<br>"
                 f"Utilization: {r['beam_utilization']:.3f}<br>"
@@ -419,8 +438,13 @@ def draw_beam_schematic(result):
         fillcolor="rgba(180,180,180,0.35)"
     )
 
+    section_class_text = format_section_class_text(result.get('beam_section_class'))
+    section_info = f"<b>{result['beam_section']}</b>"
+    if section_class_text:
+        section_info += f" ({section_class_text})"
+
     fig.add_annotation(
-        x=0.5, y=1.02, text=f"<b>{result['beam_section']}</b>",
+        x=0.5, y=1.02, text=section_info,
         showarrow=False, font=dict(size=13)
     )
     fig.add_annotation(
@@ -704,6 +728,8 @@ def show_member_details(result, selected_member_type, building):
         st.markdown("**Member type:** Beam")
         st.markdown(f"**Storey:** {result['storey']}")
         st.markdown(f"**Section:** {result['beam_section']}")
+        if result.get('beam_section_class') is not None:
+            st.markdown(f"**Section class:** Class {int(result['beam_section_class'])}")
         st.markdown(f"**Grade:** {result['beam_grade']}")
         st.markdown(f"**Stress:** {result['beam_stress_MPa']:.3f} MPa")
         st.markdown(f"**Utilization:** {result['beam_utilization']:.3f} ({band})")
@@ -724,6 +750,8 @@ def show_member_details(result, selected_member_type, building):
         st.markdown("**Member type:** Column")
         st.markdown(f"**Storey:** {result['storey']}")
         st.markdown(f"**Section:** {result['column_section']}")
+        if result.get('column_section_class') is not None:
+            st.markdown(f"**Section class:** Class {int(result['column_section_class'])}")
         st.markdown(f"**Grade:** {result['column_grade']}")
         st.markdown(f"**Axial force:** {result['column_force_kN']:.3f} kN")
         st.markdown(f"**Stress:** {result['column_stress_MPa']:.3f} MPa")
@@ -810,8 +838,13 @@ def parse_class_list(class_text):
     """
     Example:
     '1,2' -> [1,2]
+    Validates that all values are between 1 and 4.
     """
-    return [int(x.strip()) for x in class_text.split(",") if x.strip()]
+    classes = [int(x.strip()) for x in class_text.split(",") if x.strip()]
+    for cls in classes:
+        if cls < 1 or cls > 4:
+            raise ValueError(f"Section class must be between 1 and 4, got {cls}")
+    return classes
 
 
 def build_constraints_input(num_storeys, run_mode):
@@ -935,9 +968,70 @@ def build_constraints_input(num_storeys, run_mode):
     
     beam_class_rules_enabled = st.sidebar.checkbox(
         "Enable beam class rules",
-        value=True,
+        value=False,
         help="Check to enforce beam section class restrictions by storey"
     )
+
+    # Initialize session state for additional beam rules
+    if "beam_rule_count" not in st.session_state:
+        st.session_state["beam_rule_count"] = 0
+
+    # Buttons for Add and Delete - aligned left with no gap
+    beam_button_cols = st.sidebar.columns([1, 1.3, 2.7])
+    if beam_button_cols[0].button(
+        "Add",
+        disabled=not beam_class_rules_enabled,
+        help="Click to add another Beam Storey and Class combination",
+        key="add_beam_rule"
+    ):
+        st.session_state["beam_rule_count"] += 1
+        st.rerun()
+    
+    if beam_button_cols[1].button(
+        "Delete",
+        disabled=(not beam_class_rules_enabled or st.session_state["beam_rule_count"] == 0),
+        help="Click to delete the latest Beam rule",
+        key="delete_beam_rule"
+    ):
+        if st.session_state["beam_rule_count"] > 0:
+            st.session_state["beam_rule_count"] -= 1
+            st.rerun()
+
+    beam_cols = st.sidebar.columns(2)
+    beam_class_rule_storey_text = beam_cols[0].text_input(
+        "Beam Storey",
+        value="1-3",
+        disabled=not beam_class_rules_enabled
+    )
+
+    beam_class_rule_allowed_text = beam_cols[1].text_input(
+        "Class",
+        value="1,2,3",
+        disabled=not beam_class_rules_enabled,
+        help="Enter comma-separated class values (1-4, e.g., 1,2,3)"
+    )
+
+    additional_beam_rules = []
+    
+    # Generate additional rule sets based on beam_rule_count
+    for i in range(st.session_state["beam_rule_count"]):
+        rule_num = i + 2
+        beam_cols_n = st.sidebar.columns(2)
+        storey_key = f"beam_storey_{rule_num}"
+        class_key = f"beam_class_{rule_num}"
+        
+        beam_storey_n = beam_cols_n[0].text_input(
+            f"Beam Storey ({rule_num})",
+            value="",
+            key=storey_key
+        )
+        beam_class_n = beam_cols_n[1].text_input(
+            f"Class ({rule_num})",
+            value="",
+            key=class_key,
+            help="Enter comma-separated class values (1-4, e.g., 1,2)"
+        )
+        additional_beam_rules.append((beam_storey_n, beam_class_n))
 
     column_class_rules_enabled = st.sidebar.checkbox(
         "Enable column class rules",
@@ -945,29 +1039,66 @@ def build_constraints_input(num_storeys, run_mode):
         help="Check to enforce column section class restrictions by storey"
     )
 
-    beam_class_rule_storey_text = st.sidebar.text_input(
-        "Beam class rule storeys",
-        value="1-3",
-        disabled=not beam_class_rules_enabled
-    )
+    # Initialize session state for additional column rules
+    if "column_rule_count" not in st.session_state:
+        st.session_state["column_rule_count"] = 0
 
-    beam_class_rule_allowed_text = st.sidebar.text_input(
-        "Allowed beam classes for those storeys",
-        value="1,2,3",
-        disabled=not beam_class_rules_enabled
-    )
+    # Buttons for Add and Delete - aligned left with no gap
+    column_button_cols = st.sidebar.columns([1, 1.3, 2.7])
+    if column_button_cols[0].button(
+        "Add",
+        disabled=not column_class_rules_enabled,
+        help="Click to add another Column Storey and Class combination",
+        key="add_column_rule"
+    ):
+        st.session_state["column_rule_count"] += 1
+        st.rerun()
+    
+    if column_button_cols[1].button(
+        "Delete",
+        disabled=(not column_class_rules_enabled or st.session_state["column_rule_count"] == 0),
+        help="Click to delete the latest Column rule",
+        key="delete_column_rule"
+    ):
+        if st.session_state["column_rule_count"] > 0:
+            st.session_state["column_rule_count"] -= 1
+            st.rerun()
 
-    class_rule_storey_text = st.sidebar.text_input(
-        "Column class rule storeys",
+    column_cols = st.sidebar.columns(2)
+    class_rule_storey_text = column_cols[0].text_input(
+        "Column Storey",
         value="1-3",
         disabled=not column_class_rules_enabled
     )
 
-    class_rule_allowed_text = st.sidebar.text_input(
-        "Allowed column classes for those storeys",
+    class_rule_allowed_text = column_cols[1].text_input(
+        "Class",
         value="1,2",
-        disabled=not column_class_rules_enabled
+        disabled=not column_class_rules_enabled,
+        help="Enter comma-separated class values (1-4, e.g., 1,2)"
     )
+
+    additional_column_rules = []
+    
+    # Generate additional column rule sets based on column_rule_count
+    for i in range(st.session_state["column_rule_count"]):
+        rule_num = i + 2
+        column_cols_n = st.sidebar.columns(2)
+        storey_key = f"column_storey_{rule_num}"
+        class_key = f"column_class_{rule_num}"
+        
+        column_storey_n = column_cols_n[0].text_input(
+            f"Column Storey ({rule_num})",
+            value="",
+            key=storey_key
+        )
+        column_class_n = column_cols_n[1].text_input(
+            f"Class ({rule_num})",
+            value="",
+            key=class_key,
+            help="Enter comma-separated class values (1-4, e.g., 1,2)"
+        )
+        additional_column_rules.append((column_storey_n, column_class_n))
 
     try:
         if run_mode != "Individual-Storey Optimization":
@@ -1000,12 +1131,34 @@ def build_constraints_input(num_storeys, run_mode):
                 "allowed_classes": beam_allowed_classes
             })
 
+        # Add additional beam rules if any
+        for storey_text, class_text in additional_beam_rules:
+            if storey_text.strip() and class_text.strip():
+                additional_storeys = parse_rule_storeys(storey_text)
+                additional_classes = parse_class_list(class_text)
+                if additional_storeys and additional_classes:
+                    beam_class_rules.append({
+                        "storeys": additional_storeys,
+                        "allowed_classes": additional_classes
+                    })
+
         column_class_rules = []
         if column_class_rules_enabled and class_rule_storeys and allowed_classes:
             column_class_rules.append({
                 "storeys": class_rule_storeys,
                 "allowed_classes": allowed_classes
             })
+
+        # Add additional column rules if any
+        for storey_text, class_text in additional_column_rules:
+            if storey_text.strip() and class_text.strip():
+                additional_storeys = parse_rule_storeys(storey_text)
+                additional_classes = parse_class_list(class_text)
+                if additional_storeys and additional_classes:
+                    column_class_rules.append({
+                        "storeys": additional_storeys,
+                        "allowed_classes": additional_classes
+                    })
 
     except Exception as e:
         st.sidebar.error(f"Constraint input error: {e}")
@@ -1075,8 +1228,8 @@ def build_sidebar_input(default_data, all_sections, all_grades, all_codes):
     candidate_pool = st.sidebar.number_input(
         "Candidate pool size per shape",
         min_value=2,
-        max_value=30,
-        value=8,
+        max_value=500,
+        value=500,
         step=1
     )
 
@@ -1108,28 +1261,32 @@ def build_sidebar_input(default_data, all_sections, all_grades, all_codes):
                 f"Beam section S{level}",
                 all_sections,
                 index=all_sections.index(d["beam_section"]) if d["beam_section"] in all_sections else 0,
-                key=f"bs_{level}"
+                key=f"bs_{level}",
+                disabled=(run_mode == "Grouped Optimization")
             )
 
             beam_grade = st.selectbox(
                 f"Beam grade S{level}",
                 all_grades,
                 index=all_grades.index(d["beam_grade"]) if d["beam_grade"] in all_grades else 0,
-                key=f"bg_{level}"
+                key=f"bg_{level}",
+                disabled=(run_mode == "Grouped Optimization")
             )
 
             column_section = st.selectbox(
                 f"Column section S{level}",
                 all_sections,
                 index=all_sections.index(d["column_section"]) if d["column_section"] in all_sections else 0,
-                key=f"cs_{level}"
+                key=f"cs_{level}",
+                disabled=(run_mode == "Grouped Optimization")
             )
 
             column_grade = st.selectbox(
                 f"Column grade S{level}",
                 all_grades,
                 index=all_grades.index(d["column_grade"]) if d["column_grade"] in all_grades else 0,
-                key=f"cg_{level}"
+                key=f"cg_{level}",
+                disabled=(run_mode == "Grouped Optimization")
             )
 
             rows.append({
@@ -1166,7 +1323,7 @@ def build_sidebar_input(default_data, all_sections, all_grades, all_codes):
 
 
 def show_optimization_settings(input_data):
-    st.subheader("Optimisation Settings")
+    st.subheader("Optimization Settings")
     st.markdown(f"**Mode:** {input_data['run_mode']}")
     st.markdown(
         f"**Beam shapes searched:** {', '.join(input_data['constraints']['allowed_beam_shapes'])}"

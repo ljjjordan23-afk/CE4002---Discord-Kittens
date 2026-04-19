@@ -61,20 +61,20 @@ def _normalize_groups(groups, num_storeys):
     return normalized
 
 
-def _class_limit_for_storey(storey, class_rules):
+def _allowed_classes_for_storey(storey, class_rules):
     if not class_rules:
         return None
 
-    allowed = []
+    allowed = set()
     for rule in class_rules:
         rule_storeys = {int(s) for s in rule.get("storeys", [])}
         if int(storey) in rule_storeys:
-            allowed.extend(int(c) for c in rule.get("allowed_classes", []))
+            allowed.update(int(c) for c in rule.get("allowed_classes", []))
 
     if not allowed:
         return None
 
-    return max(allowed)
+    return allowed
 
 
 def _get_sections_for_shapes(shapes, max_per_shape=None):
@@ -141,8 +141,8 @@ def _evaluate_beam_group(
     for section in sections:
         class_ok = True
         for storey in group_storeys:
-            class_limit = _class_limit_for_storey(storey, class_rules)
-            if class_limit is not None and int(section.section_class) > class_limit:
+            allowed_classes = _allowed_classes_for_storey(storey, class_rules)
+            if allowed_classes is not None and int(section.section_class) not in allowed_classes:
                 class_ok = False
                 break
         if not class_ok:
@@ -241,8 +241,8 @@ def _evaluate_column_group(
     for section in sorted_sections:
         class_ok = True
         for storey in group_storeys:
-            class_limit = _class_limit_for_storey(storey, class_rules)
-            if class_limit is not None and int(section.section_class) > class_limit:
+            allowed_classes = _allowed_classes_for_storey(storey, class_rules)
+            if allowed_classes is not None and int(section.section_class) not in allowed_classes:
                 class_ok = False
                 break
         if not class_ok:
@@ -317,12 +317,12 @@ def _evaluate_column_group(
     # Debug: show what was evaluated
     min_section_tried = sorted_sections[0].name if sorted_sections else "N/A"
     max_section_tried = sorted_sections[-1].name if sorted_sections else "N/A"
-    min_util_str = f"{min_util_achieved:.2f}" if min_util_achieved != float('inf') else "N/A"
-    best_section_str = f"{best_section_for_min_util[0]} {best_section_for_min_util[1]} (util={best_section_for_min_util[2]:.2f})" if best_section_for_min_util else "N/A"
     
-    print(f"DEBUG: Column group {group_storeys}: governing_storey={governing_storey_idx}, class_rejected={class_rejected}, util_rejected={util_rejected}, feasible={len(candidates)}")
-    print(f"DEBUG: Sections evaluated: {min_section_tried} to {max_section_tried} ({len(sorted_sections)} total)")
-    print(f"DEBUG: Min util achieved: {min_util_str} with {best_section_str} (target: {u_min}-{u_max})")
+    print(f"DEBUG: Column group {group_storeys} - evaluated {len(sorted_sections)} sections, {len(sorted_materials)} materials, generated {len(candidates)} candidates")
+    if candidates:
+        print(f"DEBUG: Cheapest column candidate: {candidates[0].section_name} {candidates[0].grade} cost={candidates[0].total_cost}")
+    if class_rejected > 0:
+        print(f"DEBUG: {class_rejected} sections rejected by class rules, {util_rejected} by utilization bounds")
     if sample_utils:
         print(f"DEBUG: Sample utils: {sample_utils}")
     return candidates
