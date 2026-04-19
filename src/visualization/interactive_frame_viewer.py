@@ -982,7 +982,8 @@ def build_constraints_input(num_storeys, run_mode):
         "Add",
         disabled=not beam_class_rules_enabled,
         help="Click to add another Beam Storey and Class combination",
-        key="add_beam_rule"
+        key="add_beam_rule",
+        use_container_width=True
     ):
         st.session_state["beam_rule_count"] += 1
         st.rerun()
@@ -991,7 +992,8 @@ def build_constraints_input(num_storeys, run_mode):
         "Delete",
         disabled=(not beam_class_rules_enabled or st.session_state["beam_rule_count"] == 0),
         help="Click to delete the latest Beam rule",
-        key="delete_beam_rule"
+        key="delete_beam_rule",
+        use_container_width=True
     ):
         if st.session_state["beam_rule_count"] > 0:
             st.session_state["beam_rule_count"] -= 1
@@ -1049,7 +1051,8 @@ def build_constraints_input(num_storeys, run_mode):
         "Add",
         disabled=not column_class_rules_enabled,
         help="Click to add another Column Storey and Class combination",
-        key="add_column_rule"
+        key="add_column_rule",
+        use_container_width=True
     ):
         st.session_state["column_rule_count"] += 1
         st.rerun()
@@ -1058,7 +1061,8 @@ def build_constraints_input(num_storeys, run_mode):
         "Delete",
         disabled=(not column_class_rules_enabled or st.session_state["column_rule_count"] == 0),
         help="Click to delete the latest Column rule",
-        key="delete_column_rule"
+        key="delete_column_rule",
+        use_container_width=True
     ):
         if st.session_state["column_rule_count"] > 0:
             st.session_state["column_rule_count"] -= 1
