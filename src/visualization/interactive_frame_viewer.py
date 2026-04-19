@@ -977,9 +977,8 @@ def build_constraints_input(num_storeys, run_mode):
         st.session_state["beam_rule_count"] = 0
 
     # Buttons for Add and Delete - aligned left with no gap
-    beam_button_cols = st.sidebar.columns([1, 1.3, 2.7])
-    if beam_button_cols[0].button(
-        "Add",
+    if st.sidebar.button(
+        "Add Beam Rule",
         disabled=not beam_class_rules_enabled,
         help="Click to add another Beam Storey and Class combination",
         key="add_beam_rule",
@@ -988,8 +987,8 @@ def build_constraints_input(num_storeys, run_mode):
         st.session_state["beam_rule_count"] += 1
         st.rerun()
     
-    if beam_button_cols[1].button(
-        "Delete",
+    if st.sidebar.button(
+        "Delete Beam Rule",
         disabled=(not beam_class_rules_enabled or st.session_state["beam_rule_count"] == 0),
         help="Click to delete the latest Beam rule",
         key="delete_beam_rule",
@@ -1046,9 +1045,8 @@ def build_constraints_input(num_storeys, run_mode):
         st.session_state["column_rule_count"] = 0
 
     # Buttons for Add and Delete - aligned left with no gap
-    column_button_cols = st.sidebar.columns([1, 1.3, 2.7])
-    if column_button_cols[0].button(
-        "Add",
+    if st.sidebar.button(
+        "Add Column Rule",
         disabled=not column_class_rules_enabled,
         help="Click to add another Column Storey and Class combination",
         key="add_column_rule",
@@ -1057,8 +1055,8 @@ def build_constraints_input(num_storeys, run_mode):
         st.session_state["column_rule_count"] += 1
         st.rerun()
     
-    if column_button_cols[1].button(
-        "Delete",
+    if st.sidebar.button(
+        "Delete Column Rule",
         disabled=(not column_class_rules_enabled or st.session_state["column_rule_count"] == 0),
         help="Click to delete the latest Column rule",
         key="delete_column_rule",
