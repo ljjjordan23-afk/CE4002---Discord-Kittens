@@ -856,7 +856,8 @@ def build_constraints_input(num_storeys, run_mode):
         min_value=0.0,
         max_value=1.5,
         value=0.2,
-        step=0.05
+        step=0.05,
+        disabled=run_mode == "Analysis"
     )
 
     u_max = st.sidebar.number_input(
@@ -864,7 +865,8 @@ def build_constraints_input(num_storeys, run_mode):
         min_value=0.0,
         max_value=1.5,
         value=0.7,
-        step=0.05
+        step=0.05,
+        disabled=run_mode == "Analysis"
     )
 
     if run_mode == "Individual-Storey Optimization":
@@ -899,25 +901,29 @@ def build_constraints_input(num_storeys, run_mode):
         beam_group_text = st.sidebar.text_input(
             "Beam groups",
             value=default_beam_group_text,
+            disabled=run_mode == "Analysis",
             key=f"beam_group_text_{run_mode}_{num_storeys}"
         )
 
         column_group_text = st.sidebar.text_input(
             "Column groups",
             value=default_column_group_text,
+            disabled=run_mode == "Analysis",
             key=f"column_group_text_{run_mode}_{num_storeys}"
         )
 
     min_grade = st.sidebar.selectbox(
         "Minimum steel grade",
         ["S235", "S275", "S355", "S420", "S460"],
-        index=0
+        index=0,
+        disabled=run_mode == "Analysis"
     )
 
     max_grade = st.sidebar.selectbox(
         "Maximum steel grade",
         ["S235", "S275", "S355", "S420", "S460"],
-        index=2
+        index=2,
+        disabled=run_mode == "Analysis"
     )
 
     if int(min_grade.replace("S", "")) > int(max_grade.replace("S", "")):
@@ -927,6 +933,7 @@ def build_constraints_input(num_storeys, run_mode):
         "Allowed beam shapes",
         ["I", "SHS", "CHS"],
         default=["I"],
+        disabled=run_mode == "Analysis",
         help="Choose which section families the optimizer may search for beams."
     )
 
@@ -934,6 +941,7 @@ def build_constraints_input(num_storeys, run_mode):
         "Allowed column shapes",
         ["I", "SHS", "CHS"],
         default=["SHS", "CHS"],
+        disabled=run_mode == "Analysis",
         help="Choose which section families the optimizer may search for columns."
     )
 
@@ -969,6 +977,7 @@ def build_constraints_input(num_storeys, run_mode):
     beam_class_rules_enabled = st.sidebar.checkbox(
         "Enable beam class rules",
         value=False,
+        disabled=run_mode == "Analysis",
         help="Check to enforce beam section class restrictions by storey"
     )
 
@@ -979,7 +988,7 @@ def build_constraints_input(num_storeys, run_mode):
     # Buttons for Add and Delete - aligned left with no gap
     if st.sidebar.button(
         "Add Beam Rule",
-        disabled=not beam_class_rules_enabled,
+        disabled=(run_mode == "Analysis" or not beam_class_rules_enabled),
         help="Click to add another Beam Storey and Class combination",
         key="add_beam_rule",
         use_container_width=True
@@ -989,7 +998,7 @@ def build_constraints_input(num_storeys, run_mode):
     
     if st.sidebar.button(
         "Delete Beam Rule",
-        disabled=(not beam_class_rules_enabled or st.session_state["beam_rule_count"] == 0),
+        disabled=(run_mode == "Analysis" or not beam_class_rules_enabled or st.session_state["beam_rule_count"] == 0),
         help="Click to delete the latest Beam rule",
         key="delete_beam_rule",
         use_container_width=True
@@ -1002,13 +1011,13 @@ def build_constraints_input(num_storeys, run_mode):
     beam_class_rule_storey_text = beam_cols[0].text_input(
         "Beam Storey",
         value="1-3",
-        disabled=not beam_class_rules_enabled
+        disabled=(run_mode == "Analysis" or not beam_class_rules_enabled)
     )
 
     beam_class_rule_allowed_text = beam_cols[1].text_input(
         "Class",
         value="1,2,3",
-        disabled=not beam_class_rules_enabled,
+        disabled=(run_mode == "Analysis" or not beam_class_rules_enabled),
         help="Enter comma-separated class values (1-4, e.g., 1,2,3)"
     )
 
@@ -1024,12 +1033,14 @@ def build_constraints_input(num_storeys, run_mode):
         beam_storey_n = beam_cols_n[0].text_input(
             f"Beam Storey ({rule_num})",
             value="",
-            key=storey_key
+            key=storey_key,
+            disabled=(run_mode == "Analysis" or not beam_class_rules_enabled)
         )
         beam_class_n = beam_cols_n[1].text_input(
             f"Class ({rule_num})",
             value="",
             key=class_key,
+            disabled=(run_mode == "Analysis" or not beam_class_rules_enabled),
             help="Enter comma-separated class values (1-4, e.g., 1,2)"
         )
         additional_beam_rules.append((beam_storey_n, beam_class_n))
@@ -1037,6 +1048,7 @@ def build_constraints_input(num_storeys, run_mode):
     column_class_rules_enabled = st.sidebar.checkbox(
         "Enable column class rules",
         value=True,
+        disabled=run_mode == "Analysis",
         help="Check to enforce column section class restrictions by storey"
     )
 
@@ -1047,7 +1059,7 @@ def build_constraints_input(num_storeys, run_mode):
     # Buttons for Add and Delete - aligned left with no gap
     if st.sidebar.button(
         "Add Column Rule",
-        disabled=not column_class_rules_enabled,
+        disabled=(run_mode == "Analysis" or not column_class_rules_enabled),
         help="Click to add another Column Storey and Class combination",
         key="add_column_rule",
         use_container_width=True
@@ -1057,7 +1069,7 @@ def build_constraints_input(num_storeys, run_mode):
     
     if st.sidebar.button(
         "Delete Column Rule",
-        disabled=(not column_class_rules_enabled or st.session_state["column_rule_count"] == 0),
+        disabled=(run_mode == "Analysis" or not column_class_rules_enabled or st.session_state["column_rule_count"] == 0),
         help="Click to delete the latest Column rule",
         key="delete_column_rule",
         use_container_width=True
@@ -1070,13 +1082,13 @@ def build_constraints_input(num_storeys, run_mode):
     class_rule_storey_text = column_cols[0].text_input(
         "Column Storey",
         value="1-3",
-        disabled=not column_class_rules_enabled
+        disabled=(run_mode == "Analysis" or not column_class_rules_enabled)
     )
 
     class_rule_allowed_text = column_cols[1].text_input(
         "Class",
         value="1,2",
-        disabled=not column_class_rules_enabled,
+        disabled=(run_mode == "Analysis" or not column_class_rules_enabled),
         help="Enter comma-separated class values (1-4, e.g., 1,2)"
     )
 
@@ -1092,12 +1104,14 @@ def build_constraints_input(num_storeys, run_mode):
         column_storey_n = column_cols_n[0].text_input(
             f"Column Storey ({rule_num})",
             value="",
-            key=storey_key
+            key=storey_key,
+            disabled=(run_mode == "Analysis" or not column_class_rules_enabled)
         )
         column_class_n = column_cols_n[1].text_input(
             f"Class ({rule_num})",
             value="",
             key=class_key,
+            disabled=(run_mode == "Analysis" or not column_class_rules_enabled),
             help="Enter comma-separated class values (1-4, e.g., 1,2)"
         )
         additional_column_rules.append((column_storey_n, column_class_n))
